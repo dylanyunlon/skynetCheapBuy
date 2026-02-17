@@ -1,418 +1,279 @@
 #!/usr/bin/env python3
 """
-CheapBuy Agentic Loop 原型 (已验证可用)
-========================================
+Agentic Loop 集成测试（修复版）
+================================
+自动加载 CheapBuy 的 .env 配置，无论从哪个目录运行都可以。
 
-已确认的可用模型（tryallai.com 透传 tools）：
-  ✅ claude-sonnet-4-5-20250929  (推荐，性价比最高)
-  ✅ claude-haiku-4-5-20251001   (最快最便宜)
-  ✅ claude-opus-4-6             (最强)
-  ❌ claude-sonnet-4-20250514    (tools 被代理吞掉)
-  ❌ claude-3-5-haiku-20241022   (tools 被代理吞掉)
-
-使用：
-    cd /root/dylan/CheapBuy
-    python3 test_agentic_loop.py                      # 基础测试
-    python3 test_agentic_loop.py --test multi          # 多步骤
-    python3 test_agentic_loop.py --test debug          # 自动调试
-    python3 test_agentic_loop.py --test interactive    # 交互模式
-    python3 test_agentic_loop.py --model claude-opus-4-6 --test basic  # 指定模型
+使用方式:
+    python3 test_agentic_integration.py
 """
 
-import os, sys, json, asyncio, argparse, tempfile, logging
-from typing import Dict, Any, List
+import os
+import sys
+import json
+import asyncio
+import logging
 
-sys.path.insert(0, '/root/dylan/CheapBuy')
-try:
-    from app.config import settings
-    DEFAULT_API_KEY = settings.OPENAI_API_KEY
-    DEFAULT_BASE_URL = settings.OPENAI_API_BASE
-    print(f"✅ CheapBuy config loaded, base_url: {DEFAULT_BASE_URL}")
-except Exception:
-    DEFAULT_API_KEY = os.environ.get("API_KEY", "")
-    DEFAULT_BASE_URL = os.environ.get("API_BASE_URL", "https://api.tryallai.com/v1")
-    print("⚠️  Using env vars")
+# ============================================================================
+# 关键：加载 CheapBuy 的环境配置
+# ============================================================================
+CHEAPBUY_DIR = "/root/dylan/CheapBuy"
+SKYNET_DIR = "/root/dylan/skynetCheapBuy/skynetCheapBuy"
 
-# 默认用已验证支持 tool_use 的模型
-DEFAULT_MODEL = "claude-opus-4-6"
+# 加载 .env 文件
+env_file = os.path.join(CHEAPBUY_DIR, ".env")
+if os.path.exists(env_file):
+    with open(env_file) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, _, value = line.partition('=')
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    print(f"✅ 加载 .env: {env_file}")
+else:
+    print(f"⚠️  未找到 .env: {env_file}")
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+# 添加模块路径（优先 skynetCheapBuy，回退 CheapBuy）
+sys.path.insert(0, SKYNET_DIR)
+sys.path.insert(1, CHEAPBUY_DIR)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
 logger = logging.getLogger(__name__)
-import httpx
 
 
-# =============================================================================
-# 工具定义（Claude /v1/messages 原生格式）
-# =============================================================================
+async def test_1_tool_executor():
+    """测试 1: ToolExecutor 能正确执行工具"""
+    print("\n" + "="*60)
+    print("🧪 测试 1: ToolExecutor")
+    print("="*60)
 
-TOOLS = [
-    {
-        "name": "bash",
-        "description": "Execute a bash command on the server. Use for running scripts, installing packages, file operations, checking system status, running tests, etc.",
+    from app.core.agents.agentic_loop import ToolExecutor
+    import tempfile
+
+    work_dir = tempfile.mkdtemp(prefix="agentic_test_")
+    executor = ToolExecutor(work_dir)
+
+    # write_file
+    r = json.loads(await executor.execute("write_file", {
+        "path": "hello.py",
+        "content": "print('Hello from Agentic Loop!')\n"
+    }))
+    assert r["success"], f"write_file failed: {r}"
+    print(f"  ✅ write_file: {r['path']} ({r['size']}B)")
+
+    # read_file
+    r = json.loads(await executor.execute("read_file", {"path": "hello.py"}))
+    assert "Hello from Agentic Loop" in r["content"]
+    print(f"  ✅ read_file: {r['lines']}")
+
+    # bash
+    r = json.loads(await executor.execute("bash", {"command": "python3 hello.py"}))
+    assert r["exit_code"] == 0 and "Hello from Agentic Loop" in r["stdout"]
+    print(f"  ✅ bash: {r['stdout'].strip()}")
+
+    # edit_file
+    r = json.loads(await executor.execute("edit_file", {
+        "path": "hello.py",
+        "old_str": "Hello from Agentic Loop!",
+        "new_str": "Hello from EDITED Agentic Loop!"
+    }))
+    assert r["success"]
+    r = json.loads(await executor.execute("bash", {"command": "python3 hello.py"}))
+    assert "EDITED" in r["stdout"]
+    print(f"  ✅ edit_file + verify: {r['stdout'].strip()}")
+
+    # list_dir
+    result = await executor.execute("list_dir", {"path": "."})
+    assert "hello.py" in result
+    print(f"  ✅ list_dir: found hello.py")
+
+    # grep_search
+    result = await executor.execute("grep_search", {"pattern": "EDITED", "path": "."})
+    assert "EDITED" in result
+    print(f"  ✅ grep_search: found pattern")
+
+    print(f"\n  ✅ ToolExecutor 全部通过!")
+
+    import shutil
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+
+async def test_2_claude_provider_tools():
+    """测试 2: ClaudeCompatibleProvider 支持 tools"""
+    print("\n" + "="*60)
+    print("🧪 测试 2: ClaudeCompatibleProvider with tools")
+    print("="*60)
+
+    from app.core.ai_engine import AIEngine
+
+    ai_engine = AIEngine()
+
+    tools = [{
+        "name": "get_weather",
+        "description": "Get current weather for a city",
         "input_schema": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "The bash command to execute"}
+                "city": {"type": "string", "description": "City name"}
             },
-            "required": ["command"]
+            "required": ["city"]
         }
-    },
-    {
-        "name": "read_file",
-        "description": "Read the content of a file. Supports optional line range for large files. Returns content with line numbers.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "File path (absolute or relative to work dir)"},
-                "start_line": {"type": "integer", "description": "Start line (1-indexed, optional)"},
-                "end_line": {"type": "integer", "description": "End line (inclusive, optional)"}
-            },
-            "required": ["path"]
-        }
-    },
-    {
-        "name": "write_file",
-        "description": "Create or overwrite a file with the given content. Automatically creates parent directories.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "File path to write"},
-                "content": {"type": "string", "description": "Content to write"}
-            },
-            "required": ["path", "content"]
-        }
-    },
-    {
-        "name": "edit_file",
-        "description": "Edit a file by replacing a specific unique string with another. The old_str must appear exactly once in the file.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "File path"},
-                "old_str": {"type": "string", "description": "Exact string to replace (must be unique in file)"},
-                "new_str": {"type": "string", "description": "Replacement string"}
-            },
-            "required": ["path", "old_str", "new_str"]
-        }
-    },
-    {
-        "name": "list_dir",
-        "description": "List files and directories at the given path.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Directory path (default: working dir)"}
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "grep_search",
-        "description": "Search for a pattern in files using grep. Returns matching lines with file paths and line numbers.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "Search pattern (regex supported)"},
-                "path": {"type": "string", "description": "Directory or file to search in"},
-                "include": {"type": "string", "description": "File pattern to include (e.g. '*.py')"}
-            },
-            "required": ["pattern"]
-        }
-    }
-]
+    }]
 
+    messages = [{"role": "user", "content": "What's the weather in Beijing? Use the get_weather tool."}]
 
-# =============================================================================
-# 工具执行器
-# =============================================================================
+    print(f"  📡 Calling claude-opus-4-6 with tools...")
 
-class ToolExecutor:
-    def __init__(self, work_dir=None):
-        self.work_dir = work_dir or tempfile.mkdtemp(prefix="agentic_")
-        os.makedirs(self.work_dir, exist_ok=True)
-        print(f"📂 Work dir: {self.work_dir}")
-
-    async def execute(self, name: str, inp: Dict) -> str:
-        h = {"bash": self._bash, "read_file": self._read, "write_file": self._write,
-             "edit_file": self._edit, "list_dir": self._ls, "grep_search": self._grep}
-        try:
-            return await h[name](inp)
-        except KeyError:
-            return json.dumps({"error": f"Unknown tool: {name}"})
-        except Exception as e:
-            return json.dumps({"error": str(e)})
-
-    async def _bash(self, p):
-        cmd = p["command"]
-        logger.info(f"    $ {cmd}")
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=self.work_dir)
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
-            o = out.decode('utf-8', errors='replace')
-            e = err.decode('utf-8', errors='replace')
-            if len(o) > 8000: o = o[:8000] + "\n...[truncated]"
-            if len(e) > 3000: e = e[:3000] + "\n...[truncated]"
-            return json.dumps({"exit_code": proc.returncode, "stdout": o, "stderr": e})
-        except asyncio.TimeoutError:
-            return json.dumps({"error": "Command timed out (60s)"})
-
-    async def _read(self, p):
-        path = self._r(p["path"])
-        if not os.path.exists(path): return json.dumps({"error": f"Not found: {path}"})
-        with open(path, 'r', encoding='utf-8', errors='replace') as f: lines = f.readlines()
-        t = len(lines); s = max(1, p.get("start_line", 1)); e = min(t, p.get("end_line", t))
-        c = "".join(f"{i:4d} | {lines[i-1]}" for i in range(s, e + 1))
-        return json.dumps({"path": path, "lines": f"{s}-{e}/{t}", "content": c})
-
-    async def _write(self, p):
-        path = self._r(p["path"])
-        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f: f.write(p["content"])
-        return json.dumps({"success": True, "path": path, "bytes": len(p["content"])})
-
-    async def _edit(self, p):
-        path = self._r(p["path"])
-        if not os.path.exists(path): return json.dumps({"error": f"Not found: {path}"})
-        with open(path, 'r') as f: content = f.read()
-        n = content.count(p["old_str"])
-        if n == 0: return json.dumps({"error": "old_str not found in file"})
-        if n > 1: return json.dumps({"error": f"old_str found {n} times, must be unique"})
-        with open(path, 'w') as f: f.write(content.replace(p["old_str"], p["new_str"], 1))
-        return json.dumps({"success": True, "path": path})
-
-    async def _ls(self, p):
-        path = self._r(p.get("path", "."))
-        if not os.path.exists(path): return json.dumps({"error": f"Not found: {path}"})
-        skip = {'__pycache__', '.git', 'node_modules', '.venv', 'venv'}
-        lines = []
-        for i in sorted(os.listdir(path)):
-            if i in skip or i.startswith('.'): continue
-            full = os.path.join(path, i)
-            lines.append(f"  {i}/" if os.path.isdir(full) else f"  {i} ({os.path.getsize(full)}B)")
-        return "\n".join(lines) or "(empty)"
-
-    async def _grep(self, p):
-        path = self._r(p.get("path", "."))
-        cmd = ["grep", "-rn", "--max-count=30"]
-        if p.get("include"): cmd += ["--include", p["include"]]
-        cmd += [p["pattern"], path]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            r = out.decode('utf-8', errors='replace')
-            return r[:5000] if r else "(no matches)"
-        except:
-            return "(search error)"
-
-    def _r(self, path):
-        return path if os.path.isabs(path) else os.path.join(self.work_dir, path)
-
-
-# =============================================================================
-# Agentic Loop（httpx → tryallai.com/v1/messages + tools）
-# =============================================================================
-
-class AgenticLoop:
-    """
-    核心 Agentic Loop
-    
-    调用链路：httpx POST → tryallai.com/v1/messages (Claude 原生格式 + tools)
-    与你的 ClaudeCompatibleProvider 完全一致，只多了 tools 参数。
-    """
-
-    def __init__(self, api_key, base_url="https://api.tryallai.com/v1",
-                 model="claude-opus-4-6", max_turns=30, work_dir=None):
-        self.api_key = api_key
-        base = base_url.rstrip('/')
-        if base.endswith("/v1"): base = base[:-3]
-        self.endpoint = f"{base}/v1/messages"
-        self.model = model
-        self.max_turns = max_turns
-        self.executor = ToolExecutor(work_dir)
-        self.system = (
-            "You are an expert software engineer assistant with access to tools.\n"
-            "You can execute bash commands, read/write/edit files, list directories, and search code.\n\n"
-            "When given a task:\n"
-            "1. Understand what needs to be done\n"
-            "2. Use tools to explore and implement step by step\n"
-            "3. Verify your work by running tests or checking output\n"
-            "4. Report the final results\n\n"
-            "IMPORTANT: Always use tools to take action. Never just describe what you would do - actually do it using the tools."
-        )
-
-    async def _call_api(self, messages: List[Dict]) -> Dict:
-        """调用 Claude /v1/messages（与 ClaudeCompatibleProvider 完全一致，多了 tools）"""
-        body = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": 4096,
-            "system": self.system,
-            "tools": TOOLS,
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-            "anthropic-version": "2023-06-01"
-        }
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(self.endpoint, json=body, headers=headers)
-            if resp.status_code != 200:
-                raise Exception(f"API {resp.status_code}: {resp.text[:300]}")
-            return resp.json()
-
-    async def run(self, task: str) -> Dict[str, Any]:
-        """运行 Agentic Loop"""
-        messages = [{"role": "user", "content": task}]
-        events = []
-
-        for turn in range(1, self.max_turns + 1):
-            print(f"\n{'='*60}")
-            print(f"🔄 Turn {turn}/{self.max_turns}")
-            print(f"{'='*60}")
-
-            # 1. 调用 API
-            try:
-                data = await self._call_api(messages)
-            except Exception as e:
-                print(f"❌ API error: {e}")
-                events.append({"type": "error", "content": str(e)})
-                break
-
-            stop = data.get("stop_reason", "")
-            blocks = data.get("content", [])
-            usage = data.get("usage", {})
-            tool_uses = []
-
-            print(f"  stop_reason={stop}  tokens_in={usage.get('input_tokens',0)} tokens_out={usage.get('output_tokens',0)}")
-
-            # 2. 解析 content blocks
-            for b in blocks:
-                if b["type"] == "text":
-                    txt = b.get("text", "")
-                    if txt:
-                        display = txt[:200] + ('...' if len(txt) > 200 else '')
-                        print(f"  📝 {display}")
-                        events.append({"type": "text", "content": txt})
-                elif b["type"] == "tool_use":
-                    print(f"  🔧 {b['name']}({json.dumps(b['input'], ensure_ascii=False)[:80]})")
-                    events.append({"type": "tool_start", "tool": b["name"], "args": b["input"], "id": b["id"]})
-                    tool_uses.append(b)
-
-            # 3. assistant message
-            messages.append({"role": "assistant", "content": blocks})
-
-            # 4. 没有工具调用 → 完成
-            if not tool_uses:
-                print(f"\n✅ 完成 (stop={stop})")
-                break
-
-            # 5. 执行所有工具
-            results = []
-            for tu in tool_uses:
-                print(f"\n  ⚡ 执行 {tu['name']}...")
-                r = await self.executor.execute(tu["name"], tu["input"])
-                if len(r) > 12000: r = r[:12000] + "\n...[truncated]"
-                display = r[:150] + ('...' if len(r) > 150 else '')
-                print(f"  ✔ {display}")
-                events.append({"type": "tool_result", "tool": tu["name"], "id": tu["id"], "result": r[:500]})
-                results.append({"type": "tool_result", "tool_use_id": tu["id"], "content": r})
-
-            # 6. 工具结果回传
-            messages.append({"role": "user", "content": results})
-
-        final = "\n".join(e["content"] for e in events if e["type"] == "text")
-        total_tools = sum(1 for e in events if e["type"] == "tool_start")
-        return {"success": True, "turns": turn, "total_tool_calls": total_tools,
-                "final_text": final, "events": events, "work_dir": self.executor.work_dir}
-
-
-# =============================================================================
-# 测试
-# =============================================================================
-
-async def test_basic(loop):
-    print("\n🧪 TEST 1: 创建 Python 文件并执行")
-    r = await loop.run(
-        "Create a Python file called hello.py that prints 'Hello from CheapBuy Agentic Loop!', "
-        "then run it and show me the output."
+    result = await ai_engine.get_completion(
+        messages=messages,
+        model="claude-opus-4-6",
+        tools=tools,
+        temperature=0.1,
+        max_tokens=1024
     )
-    _show(r); return r
 
-async def test_multi(loop):
-    print("\n🧪 TEST 2: 创建计算器项目 + 单元测试")
-    r = await loop.run(
-        "Create a Python calculator project:\n"
-        "1. calculator.py with add, subtract, multiply, divide functions\n"
-        "2. test_calculator.py with unittest tests for each function\n"
-        "3. Run the tests and show results\n"
-        "4. List all files you created"
+    # 验证新增字段
+    assert "content_blocks" in result, "Missing content_blocks"
+    assert "tool_uses" in result, "Missing tool_uses"
+    assert "stop_reason" in result, "Missing stop_reason"
+
+    print(f"  ✅ content_blocks: {len(result['content_blocks'])} blocks")
+    print(f"  ✅ tool_uses: {len(result['tool_uses'])} calls")
+    print(f"  ✅ stop_reason: {result['stop_reason']}")
+
+    if result['tool_uses']:
+        tu = result['tool_uses'][0]
+        print(f"  ✅ tool_use: name={tu['name']}, id={tu['id']}, input={tu['input']}")
+    else:
+        print(f"  ⚠️  AI didn't call tool (may happen), content: {result['content'][:200]}")
+
+    # 向后兼容
+    assert isinstance(result["content"], str)
+    print(f"  ✅ backward compat: content is str, tool_calls is {result.get('tool_calls')}")
+
+    print(f"\n  ✅ Provider 改造通过!")
+
+
+async def test_3_agentic_loop():
+    """测试 3: 完整 Agentic Loop"""
+    print("\n" + "="*60)
+    print("🧪 测试 3: 完整 Agentic Loop (AI 自主创建+执行代码)")
+    print("="*60)
+
+    from app.core.ai_engine import AIEngine
+    from app.core.agents.agentic_loop import AgenticLoop
+    import tempfile
+
+    ai_engine = AIEngine()
+    work_dir = tempfile.mkdtemp(prefix="agentic_loop_test_")
+
+    loop = AgenticLoop(
+        ai_engine=ai_engine,
+        work_dir=work_dir,
+        model="claude-opus-4-6",
+        max_turns=15
     )
-    _show(r); return r
 
-async def test_debug(loop):
-    print("\n🧪 TEST 3: 自动调试循环")
-    r = await loop.run(
-        "Write a Python fibonacci function in fib.py that has an intentional off-by-one bug. "
-        "Run it to see the wrong output, then fix the bug using edit_file, "
-        "and verify that fib(10) returns 55."
+    task = (
+        "Create a Python file called calc.py with functions add(a,b) and multiply(a,b). "
+        "Then create test_calc.py that tests both functions using assert statements. "
+        "Run the tests with python3 and verify they pass."
     )
-    _show(r); return r
 
-def _show(r):
-    print(f"\n{'─'*60}")
-    print(f"📊 结果: {r['turns']} turns, {r['total_tool_calls']} tool calls")
-    for e in r['events']:
-        if e['type'] == 'tool_start':
-            print(f"   🔧 {e['tool']}: {json.dumps(e.get('args', {}), ensure_ascii=False)[:60]}")
-    print(f"\n📝 最终 AI 回复:\n{r['final_text'][:800]}")
-    print(f"\n📂 工作目录: {r['work_dir']}")
-    print(f"{'─'*60}")
+    print(f"  📝 Task: {task[:80]}...")
+    print(f"  📁 Work dir: {work_dir}")
+    print()
+
+    event_counts = {}
+
+    async for event in loop.run(task):
+        t = event["type"]
+        event_counts[t] = event_counts.get(t, 0) + 1
+
+        if t == "start":
+            print(f"  🚀 Started (model={event['model']})")
+        elif t == "text":
+            text = event["content"][:150].replace('\n', ' ')
+            print(f"  📝 [Turn {event.get('turn')}] {text}")
+        elif t == "tool_start":
+            args_str = json.dumps(event["args"], ensure_ascii=False)
+            if len(args_str) > 100:
+                args_str = args_str[:100] + "..."
+            print(f"  🔧 [Turn {event.get('turn')}] {event['tool']}({args_str})")
+        elif t == "tool_result":
+            icon = "✅" if event.get("success") else "❌"
+            preview = event.get("result", "")[:120].replace('\n', ' ')
+            print(f"  {icon} [Turn {event.get('turn')}] → {preview}")
+        elif t == "turn":
+            print(f"  🔄 Turn {event['turn']} done ({event['tool_calls_this_turn']} tools, total: {event['total_tool_calls']})")
+        elif t == "done":
+            print(f"\n  ✅ DONE! {event['turns']} turns, {event['total_tool_calls']} tool calls, {event['duration']:.1f}s")
+        elif t == "error":
+            print(f"\n  ❌ Error: {event.get('message')}")
+
+    print(f"\n  📊 Events: {event_counts}")
+
+    # 验证文件创建
+    calc_exists = os.path.exists(os.path.join(work_dir, "calc.py"))
+    test_exists = os.path.exists(os.path.join(work_dir, "test_calc.py"))
+    print(f"  📁 calc.py: {'✅' if calc_exists else '❌'}")
+    print(f"  📁 test_calc.py: {'✅' if test_exists else '❌'}")
+
+    if calc_exists:
+        with open(os.path.join(work_dir, "calc.py")) as f:
+            print(f"  📄 calc.py content:\n{f.read()}")
+
+    assert calc_exists, "calc.py should exist"
+    assert test_exists, "test_calc.py should exist"
+
+    import shutil
+    shutil.rmtree(work_dir, ignore_errors=True)
 
 
 async def main():
-    pa = argparse.ArgumentParser(description="CheapBuy Agentic Loop 测试")
-    pa.add_argument("--api-key", default=DEFAULT_API_KEY)
-    pa.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    pa.add_argument("--model", default=DEFAULT_MODEL,
-                    help="推荐: claude-opus-4-6, claude-haiku-4-5-20251001, claude-opus-4-6")
-    pa.add_argument("--test", choices=["basic", "multi", "debug", "all", "interactive"], default="basic")
-    pa.add_argument("--work-dir", default=None)
-    a = pa.parse_args()
+    print("="*60)
+    print("🔧 CheapBuy Agentic Loop 集成测试")
+    print("="*60)
 
-    if not a.api_key:
-        print("❌ 需要 API key")
-        sys.exit(1)
+    # 测试 1: ToolExecutor（纯本地）
+    await test_1_tool_executor()
 
-    print(f"\n🚀 CheapBuy Agentic Loop")
-    print(f"   Endpoint: {a.base_url}")
-    print(f"   Model: {a.model}")
-    print(f"   Test: {a.test}")
+    # 检查 API 配置
+    try:
+        from app.config import settings
+        api_key = settings.OPENAI_API_KEY
+        api_base = settings.OPENAI_API_BASE
+        if not api_key:
+            print("\n⚠️  OPENAI_API_KEY 为空，跳过测试 2-3")
+            return
+        print(f"\n📡 API: {api_base}")
+        print(f"🔑 Key: {api_key[:8]}...{api_key[-4:]}")
+    except Exception as e:
+        print(f"\n❌ 配置加载失败: {e}")
+        print("   检查 .env 文件是否存在且包含必要字段")
+        return
 
-    loop = AgenticLoop(a.api_key, a.base_url, a.model, work_dir=a.work_dir)
+    # 测试 2: Provider 改造
+    await test_2_claude_provider_tools()
 
-    if a.test == "basic":
-        await test_basic(loop)
-    elif a.test == "multi":
-        await test_multi(loop)
-    elif a.test == "debug":
-        await test_debug(loop)
-    elif a.test == "all":
-        await test_basic(loop)
-        await test_multi(loop)
-        await test_debug(loop)
-    elif a.test == "interactive":
-        print("\n💬 交互模式 - 输入任务让 AI 用工具执行，'q' 退出")
-        while True:
-            try:
-                t = input("\n👤 Task: ").strip()
-                if t.lower() in ('q', 'quit', 'exit'): break
-                if t: _show(await loop.run(t))
-            except KeyboardInterrupt:
-                break
+    # 测试 3: 完整 agentic loop
+    await test_3_agentic_loop()
 
-    print("\n✅ Done")
+    print("\n" + "="*60)
+    print("✅ 全部测试通过! Agentic Loop 改造成功!")
+    print("="*60)
+    print()
+    print("下一步:")
+    print("  1. 重启 CheapBuy: systemctl restart cheapbuy")
+    print("  2. 测试 SSE 端点: curl -N POST /api/v2/agent/agentic-task")
+    print("  3. 前端对接: useAgenticLoop hook")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

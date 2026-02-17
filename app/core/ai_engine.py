@@ -269,6 +269,8 @@ class ClaudeCompatibleProvider(AIProvider):
     ) -> Dict[str, Any]:
         try:
             # 从 messages 中提取 system 消息
+            # 注意：agentic loop 传入的 messages 可能包含 content 为 list 的 block 格式
+            # （tool_result / assistant tool_use），这些不需要拆分 system
             system_content = system_prompt
             claude_messages = []
             
@@ -279,6 +281,13 @@ class ClaudeCompatibleProvider(AIProvider):
                         system_content = system_content + "\n\n" + msg["content"]
                     else:
                         system_content = msg["content"]
+                elif isinstance(msg.get("content"), list):
+                    # Agentic loop 格式：content 是 block 数组
+                    # （assistant 的 tool_use blocks 或 user 的 tool_result blocks）
+                    claude_messages.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    })
                 else:
                     claude_messages.append({
                         "role": msg["role"],
@@ -297,15 +306,22 @@ class ClaudeCompatibleProvider(AIProvider):
             if system_content:
                 request_body["system"] = system_content
             
+            # ★ Agentic Loop 支持：传入 tools 定义
+            if kwargs.get("tools"):
+                request_body["tools"] = kwargs["tools"]
+            
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.api_key}",
                 "anthropic-version": "2023-06-01"
             }
             
-            logger.info(f"Calling Claude Messages API with model: {model}, endpoint: {self.messages_endpoint}")
+            # Agentic loop 需要更长的超时（工具调用描述可能很长）
+            timeout = 120.0 if kwargs.get("tools") else 60.0
             
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            logger.info(f"Calling Claude Messages API with model: {model}, endpoint: {self.messages_endpoint}, tools: {bool(kwargs.get('tools'))}")
+            
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     self.messages_endpoint,
                     json=request_body,
@@ -319,12 +335,16 @@ class ClaudeCompatibleProvider(AIProvider):
                 
                 data = response.json()
                 
-                # 解析 Claude 响应格式
-                content = ""
-                if data.get("content"):
-                    for block in data["content"]:
-                        if block.get("type") == "text":
-                            content += block.get("text", "")
+                # ★ 增强解析：同时提取 text 和 tool_use blocks
+                content_text = ""
+                content_blocks = data.get("content", [])
+                tool_uses = []
+                
+                for block in content_blocks:
+                    if block.get("type") == "text":
+                        content_text += block.get("text", "")
+                    elif block.get("type") == "tool_use":
+                        tool_uses.append(block)
                 
                 usage = {}
                 if data.get("usage"):
@@ -335,10 +355,15 @@ class ClaudeCompatibleProvider(AIProvider):
                     }
                 
                 return {
-                    "content": content,
+                    # 向后兼容：所有旧代码只读这个字段，不受影响
+                    "content": content_text,
                     "usage": usage,
                     "finish_reason": data.get("stop_reason", "end_turn"),
-                    "tool_calls": None
+                    "tool_calls": None,
+                    # ★ Agentic Loop 新增字段
+                    "content_blocks": content_blocks,   # 原始 content block 数组
+                    "tool_uses": tool_uses,             # tool_use block 列表
+                    "stop_reason": data.get("stop_reason", "end_turn"),
                 }
                 
         except httpx.TimeoutException:

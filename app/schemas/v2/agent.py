@@ -51,3 +51,44 @@ class ExecutionResult(BaseModel):
     duration: float
     debug_attempts: int = 0
     debug_history: List[Dict[str, Any]] = []
+
+
+# ============================================================================
+# Agentic Loop Schemas
+# ============================================================================
+
+class AgenticTaskRequest(BaseModel):
+    """Agentic Loop 任务请求"""
+    task: str = Field(..., description="任务描述（自然语言）")
+    model: Optional[str] = Field(default="claude-opus-4-6", description="AI 模型")
+    project_id: Optional[str] = Field(default=None, description="关联项目 ID（可选，不传则自动创建）")
+    max_turns: int = Field(default=30, ge=1, le=100, description="最大循环轮次")
+    system_prompt: Optional[str] = Field(default=None, description="自定义系统提示词（可选）")
+    work_dir: Optional[str] = Field(default=None, description="自定义工作目录（可选，高级用法）")
+
+
+class AgenticEventResponse(BaseModel):
+    """Agentic Loop 事件（SSE 推送）"""
+    type: str = Field(..., description="事件类型: start|text|tool_start|tool_result|turn|done|error")
+    content: Optional[str] = None
+    tool: Optional[str] = None
+    tool_use_id: Optional[str] = None
+    args: Optional[Dict[str, Any]] = None
+    result: Optional[str] = None
+    turn: Optional[int] = None
+    turns: Optional[int] = None
+    total_tool_calls: Optional[int] = None
+    duration: Optional[float] = None
+    message: Optional[str] = None
+    success: Optional[bool] = None
+
+
+class AgenticTaskResult(BaseModel):
+    """Agentic Loop 同步执行结果"""
+    success: bool
+    turns: int
+    total_tool_calls: int
+    duration: float
+    final_text: str
+    work_dir: str
+    events: List[Dict[str, Any]] = []
