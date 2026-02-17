@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-CheapBuy Agentic Loop 核心引擎
-===============================
+CheapBuy Agentic Loop 核心引擎 (v2 — 增强版)
+=============================================
 
-将 test_agentic_loop.py 的原型改造为生产级后端组件。
+相比 v1 新增:
+- web_search 工具 (对接 SerperSearchEngine)
+- web_fetch 工具 (对接 WebBrowser / Jina Reader)
+- edit_file 返回行级 diff 统计 (+N -M)
+- read_file 超长文件自动截断 + truncated 标记
+- turn 汇总事件: "Ran 3 commands, viewed 2 files, edited a file"
 
-核心思路：
-- 复用现有 AIEngine + ClaudeCompatibleProvider（已改造支持 tools）
-- ToolExecutor 在用户的 workspace 目录下执行，与项目文件系统融合
-- 通过 AsyncGenerator yield 事件，供 API 层 SSE 推送给前端
-- 每个 tool_use 都有对应的 tool_result 回传，形成完整的 agentic loop
-
-使用方式：
+使用方式:
     from app.core.agents.agentic_loop import AgenticLoop
 
     loop = AgenticLoop(ai_engine=ai_engine, work_dir="/workspace/user1/project1")
     async for event in loop.run("创建一个 Flask REST API"):
-        # event: {"type": "text|tool_start|tool_result|turn|done|error", ...}
         await sse_send(event)
 """
 
@@ -61,7 +59,8 @@ TOOL_DEFINITIONS = [
         "name": "read_file",
         "description": (
             "Read the contents of a file. Returns content with line numbers. "
-            "Use start_line/end_line for large files."
+            "For large files (>200 lines), content is auto-truncated showing head and tail. "
+            "Use start_line/end_line to view specific sections."
         ),
         "input_schema": {
             "type": "object",
@@ -132,12 +131,40 @@ TOOL_DEFINITIONS = [
             },
             "required": ["pattern"]
         }
-    }
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web using Google. Returns a list of results with title, URL and snippet. "
+            "Use this when you need current information, documentation, or answers from the internet."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query (keep it short and specific, 1-6 words)"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "web_fetch",
+        "description": (
+            "Fetch the content of a web page and return it as cleaned plain text. "
+            "Use this after web_search to read a specific page in detail."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full URL to fetch (must start with http:// or https://)"}
+            },
+            "required": ["url"]
+        }
+    },
 ]
 
 # 默认 system prompt
 AGENTIC_SYSTEM_PROMPT = """You are an expert software engineer working in a Linux environment with root access.
-You have tools to read/write/edit files, run bash commands, and search code.
+You have tools to read/write/edit files, run bash commands, search code, search the web, and fetch web pages.
 
 Rules:
 1. Always use tools to verify your work - don't assume, check.
@@ -149,7 +176,9 @@ Rules:
 7. After creating a project, always run it to verify it works.
 8. If you encounter errors, debug systematically: read the file, understand the error, fix it, verify.
 9. Keep responses concise - focus on actions, not explanations.
-10. When the task is complete and verified, stop calling tools."""
+10. When the task is complete and verified, stop calling tools.
+11. Use web_search when you need current information, API docs, or unknown topics.
+12. Use web_fetch to read full page content after finding relevant URLs via web_search."""
 
 
 # =============================================================================
@@ -163,6 +192,11 @@ class ToolExecutor:
     所有文件操作的相对路径都以 work_dir 为根目录，
     绝对路径直接使用（root 权限下安全）。
     """
+    
+    # 文件查看截断阈值
+    MAX_DISPLAY_LINES = 200
+    MAX_HEAD_LINES = 100
+    MAX_TAIL_LINES = 100
     
     def __init__(self, work_dir: str):
         self.work_dir = os.path.abspath(work_dir)
@@ -178,6 +212,8 @@ class ToolExecutor:
             "edit_file": self._edit_file,
             "list_dir": self._list_dir,
             "grep_search": self._grep_search,
+            "web_search": self._web_search,
+            "web_fetch": self._web_fetch,
         }
         
         handler = handlers.get(tool_name)
@@ -191,6 +227,9 @@ class ToolExecutor:
             logger.error(f"Tool {tool_name} execution error: {e}", exc_info=True)
             return json.dumps({"error": f"Tool execution failed: {str(e)}"})
     
+    # -------------------------------------------------------------------------
+    # bash
+    # -------------------------------------------------------------------------
     async def _bash(self, params: Dict) -> str:
         """执行 bash 命令"""
         command = params["command"]
@@ -207,13 +246,12 @@ class ToolExecutor:
             
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=120  # 2 分钟超时
+                timeout=120
             )
             
             stdout_str = stdout.decode('utf-8', errors='replace')
             stderr_str = stderr.decode('utf-8', errors='replace')
             
-            # 截断过长输出
             if len(stdout_str) > 10000:
                 stdout_str = stdout_str[:10000] + "\n...[truncated, showing first 10000 chars]"
             if len(stderr_str) > 5000:
@@ -228,8 +266,11 @@ class ToolExecutor:
         except asyncio.TimeoutError:
             return json.dumps({"error": "Command timed out after 120 seconds"})
     
+    # -------------------------------------------------------------------------
+    # read_file — 增强：自动截断 + truncated 标记
+    # -------------------------------------------------------------------------
     async def _read_file(self, params: Dict) -> str:
-        """读取文件内容"""
+        """读取文件内容，超长自动截断"""
         path = self._resolve_path(params["path"])
         
         if not os.path.exists(path):
@@ -247,6 +288,32 @@ class ToolExecutor:
                 lines = f.readlines()
             
             total = len(lines)
+            has_range = "start_line" in params or "end_line" in params
+            
+            if not has_range and total > self.MAX_DISPLAY_LINES:
+                # 自动截断：显示头 + 尾
+                head = "".join(
+                    f"{i:4d} | {lines[i-1]}" for i in range(1, self.MAX_HEAD_LINES + 1)
+                )
+                tail = "".join(
+                    f"{i:4d} | {lines[i-1]}" for i in range(total - self.MAX_TAIL_LINES + 1, total + 1)
+                )
+                omitted = total - self.MAX_HEAD_LINES - self.MAX_TAIL_LINES
+                content = (
+                    head
+                    + f"\n... [{omitted} lines truncated — use start_line/end_line to view lines "
+                    + f"{self.MAX_HEAD_LINES + 1}-{total - self.MAX_TAIL_LINES}] ...\n\n"
+                    + tail
+                )
+                return json.dumps({
+                    "path": path,
+                    "lines": f"1-{self.MAX_HEAD_LINES}+{total - self.MAX_TAIL_LINES + 1}-{total}/{total}",
+                    "content": content,
+                    "truncated": True,
+                    "truncated_range": f"{self.MAX_HEAD_LINES + 1}-{total - self.MAX_TAIL_LINES}"
+                })
+            
+            # 正常模式（含 start_line/end_line）
             start = max(1, params.get("start_line", 1))
             end = min(total, params.get("end_line", total))
             
@@ -257,18 +324,21 @@ class ToolExecutor:
             return json.dumps({
                 "path": path,
                 "lines": f"{start}-{end}/{total}",
-                "content": content
+                "content": content,
+                "truncated": False
             })
         except Exception as e:
             return json.dumps({"error": f"Failed to read file: {str(e)}"})
     
+    # -------------------------------------------------------------------------
+    # write_file
+    # -------------------------------------------------------------------------
     async def _write_file(self, params: Dict) -> str:
         """写入文件"""
         path = self._resolve_path(params["path"])
         content = params["content"]
         
         try:
-            # 自动创建父目录
             os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
             
             with open(path, 'w', encoding='utf-8') as f:
@@ -285,8 +355,11 @@ class ToolExecutor:
         except Exception as e:
             return json.dumps({"error": f"Failed to write file: {str(e)}"})
     
+    # -------------------------------------------------------------------------
+    # edit_file — 增强：行级 diff 统计 (+N -M)
+    # -------------------------------------------------------------------------
     async def _edit_file(self, params: Dict) -> str:
-        """编辑文件（精确替换）"""
+        """编辑文件（精确替换），返回行级 diff"""
         path = self._resolve_path(params["path"])
         old_str = params["old_str"]
         new_str = params["new_str"]
@@ -300,7 +373,6 @@ class ToolExecutor:
             
             count = content.count(old_str)
             if count == 0:
-                # 提供上下文帮助 AI 理解
                 return json.dumps({
                     "error": "old_str not found in file",
                     "hint": f"File has {len(content)} chars, {content.count(chr(10))} lines. "
@@ -316,15 +388,33 @@ class ToolExecutor:
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(new_content)
             
+            # 行级 diff 统计
+            old_line_count = old_str.count('\n') + (1 if old_str and not old_str.endswith('\n') else 0)
+            new_line_count = new_str.count('\n') + (1 if new_str and not new_str.endswith('\n') else 0)
+            added = max(0, new_line_count - old_line_count)
+            removed = max(0, old_line_count - new_line_count)
+            # 即使行数没变也至少算 1 行修改
+            if added == 0 and removed == 0:
+                # 有内容变化但行数不变：标记为修改的行数
+                changed_lines = old_str.count('\n') + 1
+                added = changed_lines
+                removed = changed_lines
+            
+            filename = os.path.basename(path)
+            
             return json.dumps({
                 "success": True,
                 "path": path,
-                "chars_removed": len(old_str),
-                "chars_added": len(new_str)
+                "diff": f"{filename} +{added} -{removed}",
+                "added_lines": added,
+                "removed_lines": removed
             })
         except Exception as e:
             return json.dumps({"error": f"Failed to edit file: {str(e)}"})
     
+    # -------------------------------------------------------------------------
+    # list_dir
+    # -------------------------------------------------------------------------
     async def _list_dir(self, params: Dict) -> str:
         """列出目录内容"""
         path = self._resolve_path(params.get("path", "."))
@@ -345,7 +435,6 @@ class ToolExecutor:
                     continue
                 full_path = os.path.join(path, item)
                 if os.path.isdir(full_path):
-                    # 统计子目录中的文件数
                     try:
                         count = len([f for f in os.listdir(full_path) if not f.startswith('.')])
                     except PermissionError:
@@ -365,6 +454,9 @@ class ToolExecutor:
         except Exception as e:
             return json.dumps({"error": f"Failed to list directory: {str(e)}"})
     
+    # -------------------------------------------------------------------------
+    # grep_search
+    # -------------------------------------------------------------------------
     async def _grep_search(self, params: Dict) -> str:
         """搜索代码"""
         pattern = params["pattern"]
@@ -375,7 +467,6 @@ class ToolExecutor:
         if params.get("include"):
             cmd += ["--include", params["include"]]
         
-        # 排除常见的无关目录
         cmd += [
             "--exclude-dir=__pycache__",
             "--exclude-dir=.git",
@@ -398,7 +489,6 @@ class ToolExecutor:
             if not result:
                 return "(no matches found)"
             
-            # 截断过长结果
             if len(result) > 8000:
                 result = result[:8000] + "\n...[truncated, showing first 8000 chars]"
             
@@ -409,11 +499,166 @@ class ToolExecutor:
         except Exception as e:
             return json.dumps({"error": f"Search failed: {str(e)}"})
     
+    # -------------------------------------------------------------------------
+    # web_search — 新增：对接 SerperSearchEngine
+    # -------------------------------------------------------------------------
+    async def _web_search(self, params: Dict) -> str:
+        """搜索网络"""
+        query = params["query"]
+        logger.info(f"[web_search] query: {query}")
+        
+        try:
+            from app.core.web_search import SerperSearchEngine
+            engine = SerperSearchEngine()
+            results = await engine.search(query, max_results=10)
+            
+            if not results:
+                return json.dumps({"query": query, "results_count": 0, "results": []})
+            
+            # 检查是否有错误
+            if results and isinstance(results[0], dict) and "error" in results[0]:
+                return json.dumps({
+                    "query": query,
+                    "error": results[0]["error"]
+                })
+            
+            return json.dumps({
+                "query": query,
+                "results_count": len(results),
+                "results": results
+            }, ensure_ascii=False)
+            
+        except ImportError:
+            # 降级：用 bash curl 调搜索
+            logger.warning("web_search: SerperSearchEngine not available, falling back to stub")
+            return json.dumps({
+                "query": query,
+                "error": "Web search module not available. Install: SERPER_API_KEY in .env"
+            })
+        except Exception as e:
+            logger.error(f"web_search error: {e}", exc_info=True)
+            return json.dumps({"query": query, "error": str(e)})
+    
+    # -------------------------------------------------------------------------
+    # web_fetch — 新增：对接 WebBrowser (Jina Reader)
+    # -------------------------------------------------------------------------
+    async def _web_fetch(self, params: Dict) -> str:
+        """获取网页内容"""
+        url = params["url"]
+        logger.info(f"[web_fetch] url: {url}")
+        
+        try:
+            from app.core.web_search import WebBrowser
+            browser = WebBrowser(max_content_length=15000)
+            content = await browser.browse(url, clean=True)
+            
+            return json.dumps({
+                "url": url,
+                "content_length": len(content),
+                "content": content
+            }, ensure_ascii=False)
+            
+        except ImportError:
+            # 降级：用 httpx 直接获取
+            logger.warning("web_fetch: WebBrowser not available, using httpx fallback")
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                    resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                    text = resp.text
+                    # 简单去 HTML 标签
+                    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
+                    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+                    text = re.sub(r'<[^>]+>', ' ', text)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    if len(text) > 15000:
+                        text = text[:15000] + "\n...[truncated]"
+                    return json.dumps({
+                        "url": url,
+                        "status": resp.status_code,
+                        "content_length": len(text),
+                        "content": text
+                    }, ensure_ascii=False)
+            except Exception as e2:
+                return json.dumps({"url": url, "error": str(e2)})
+        except Exception as e:
+            logger.error(f"web_fetch error: {e}", exc_info=True)
+            return json.dumps({"url": url, "error": str(e)})
+    
+    # -------------------------------------------------------------------------
+    # 路径解析
+    # -------------------------------------------------------------------------
     def _resolve_path(self, path: str) -> str:
         """解析路径 - 相对路径基于 work_dir，绝对路径直接使用"""
         if os.path.isabs(path):
             return path
         return os.path.join(self.work_dir, path)
+
+
+# =============================================================================
+# Turn 汇总工具
+# =============================================================================
+
+def build_turn_summary(tool_uses: List[Dict]) -> Dict[str, Any]:
+    """
+    根据本轮的 tool_use 列表，生成汇总统计和展示文本。
+    
+    返回:
+        {
+            "commands_run": 3,
+            "files_viewed": 2,
+            "files_edited": 1,
+            "files_created": 0,
+            "searches": 1,
+            "pages_fetched": 0,
+            "display": "Ran 3 commands, viewed 2 files, edited a file, searched the web"
+        }
+    """
+    counts = {
+        "bash": 0, "read_file": 0, "write_file": 0,
+        "edit_file": 0, "list_dir": 0, "grep_search": 0,
+        "web_search": 0, "web_fetch": 0,
+    }
+    for tu in tool_uses:
+        name = tu.get("name", "")
+        if name in counts:
+            counts[name] += 1
+    
+    parts = []
+    if counts["bash"]:
+        n = counts["bash"]
+        parts.append(f"Ran {n} command{'s' if n > 1 else ''}")
+    if counts["read_file"]:
+        n = counts["read_file"]
+        parts.append(f"viewed {n} file{'s' if n > 1 else ''}")
+    if counts["write_file"]:
+        n = counts["write_file"]
+        parts.append(f"created {n} file{'s' if n > 1 else ''}")
+    if counts["edit_file"]:
+        n = counts["edit_file"]
+        parts.append(f"edited {n} file{'s' if n > 1 else ''}")
+    if counts["list_dir"] or counts["grep_search"]:
+        n = counts["list_dir"] + counts["grep_search"]
+        parts.append(f"searched {n} path{'s' if n > 1 else ''}")
+    if counts["web_search"]:
+        parts.append("searched the web")
+    if counts["web_fetch"]:
+        n = counts["web_fetch"]
+        parts.append(f"fetched {n} page{'s' if n > 1 else ''}")
+    
+    display = ", ".join(parts) if parts else "Done"
+    # 首字母大写
+    display = display[0].upper() + display[1:] if display else "Done"
+    
+    return {
+        "commands_run": counts["bash"],
+        "files_viewed": counts["read_file"],
+        "files_edited": counts["edit_file"],
+        "files_created": counts["write_file"],
+        "searches": counts["web_search"],
+        "pages_fetched": counts["web_fetch"],
+        "display": display
+    }
 
 
 # =============================================================================
@@ -428,10 +673,11 @@ class AgenticLoop:
     调用者（API 层）将事件转为 SSE 推送给前端。
     
     事件类型：
+    - start:        任务开始
     - text:         AI 的文本输出
     - tool_start:   开始执行工具（附带工具名称和参数）
     - tool_result:  工具执行结果
-    - turn:         一轮结束
+    - turn:         一轮结束（含汇总: "Ran 3 commands, viewed 2 files"）
     - done:         任务完成
     - error:        出错
     """
@@ -470,7 +716,6 @@ class AgenticLoop:
         """
         start_time = datetime.now()
         
-        # 初始化消息
         messages = [{"role": "user", "content": task}]
         
         yield {
@@ -507,17 +752,15 @@ class AgenticLoop:
             tool_uses = result.get("tool_uses", [])
             stop_reason = result.get("stop_reason", "end_turn")
             
-            # 如果 content_blocks 为空，尝试从旧格式获取
             if not content_blocks and result.get("content"):
                 content_blocks = [{"type": "text", "text": result["content"]}]
             
             # yield 文本和工具调用事件
             for block in content_blocks:
                 if block.get("type") == "text" and block.get("text"):
-                    text = block["text"]
                     yield {
                         "type": "text",
-                        "content": text,
+                        "content": block["text"],
                         "turn": turn
                     }
                 elif block.get("type") == "tool_use":
@@ -529,24 +772,11 @@ class AgenticLoop:
                         "turn": turn
                     }
             
-            # 将 assistant 消息追加到 history（包含完整 blocks）
+            # 将 assistant 消息追加到 history
             messages.append({"role": "assistant", "content": content_blocks})
             
             # ====== 判断是否结束 ======
             if not tool_uses:
-                # AI 没有调用任何工具，任务完成
-                duration = (datetime.now() - start_time).total_seconds()
-                yield {
-                    "type": "done",
-                    "turns": turn,
-                    "total_tool_calls": self.total_tool_calls,
-                    "duration": duration,
-                    "stop_reason": stop_reason,
-                    "work_dir": self.work_dir
-                }
-                return
-            
-            if stop_reason == "end_turn" and not tool_uses:
                 duration = (datetime.now() - start_time).total_seconds()
                 yield {
                     "type": "done",
@@ -569,10 +799,8 @@ class AgenticLoop:
                 
                 logger.info(f"[AgenticLoop] Executing tool: {tool_name} (id={tool_id})")
                 
-                # 执行
                 result_str = await self.executor.execute(tool_name, tool_input)
                 
-                # 截断过长的结果
                 if len(result_str) > 15000:
                     result_str = result_str[:15000] + "\n...[truncated to 15000 chars]"
                 
@@ -586,22 +814,24 @@ class AgenticLoop:
                     "turn": turn
                 }
                 
-                # 构造 Claude 格式的 tool_result
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_id,
                     "content": result_str
                 })
             
-            # 将工具结果追加到 messages（Claude 格式：user message with tool_result blocks）
+            # 将工具结果追加到 messages
             messages.append({"role": "user", "content": tool_results})
             
-            # yield turn 完成事件
+            # ====== yield turn 汇总事件 ======
+            summary = build_turn_summary(tool_uses)
             yield {
                 "type": "turn",
                 "turn": turn,
                 "tool_calls_this_turn": len(tool_uses),
-                "total_tool_calls": self.total_tool_calls
+                "total_tool_calls": self.total_tool_calls,
+                "summary": summary,
+                "display": summary["display"]
             }
         
         # 达到最大轮次
