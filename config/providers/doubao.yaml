@@ -1,0 +1,12 @@
+name: doubao
+display_name: Doubao AI
+api_base: ${https://api.tryallai.com/v1}
+api_version: v1
+timeout: 120
+max_retries: 3
+rate_limits:
+  requests_per_minute: 60
+  tokens_per_minute: 150000
+custom_headers:
+  X-Provider: doubao
+enabled: true

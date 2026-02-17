@@ -1,0 +1,42 @@
+models:
+  - name: o3-gz
+    provider: custom.doubao
+    display_name: Doubao 1.5 Pro (256K)
+    description: Fast and efficient model with 256K context window
+    capabilities:
+      chat: true
+      streaming: true
+      function_calling: true
+      image_input: false
+      max_tokens: 4096
+      context_window: 262144
+    cost:
+      input_per_1k: 0.0005
+      output_per_1k: 0.0015
+    limits:
+      max_requests_per_minute: 60
+      max_tokens_per_minute: 150000
+    tags: ["fast", "efficient", "long-context"]
+    enabled: true
+    priority: 100
+
+  - name: gpt-4-turbo-preview
+    provider: openai
+    display_name: GPT-4 Turbo
+    description: Latest GPT-4 with 128K context
+    capabilities:
+      chat: true
+      streaming: true
+      function_calling: true
+      image_input: false
+      max_tokens: 4096
+      context_window: 128000
+    cost:
+      input_per_1k: 0.01
+      output_per_1k: 0.03
+    limits:
+      max_requests_per_minute: 500
+      max_tokens_per_minute: 150000
+    tags: ["powerful", "reasoning", "long-context"]
+    enabled: true
+    priority: 90

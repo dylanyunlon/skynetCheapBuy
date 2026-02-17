@@ -1,0 +1,270 @@
+.
+|-- 0620_setup_code_management.sh
+|-- adapted_project_test.py
+|-- add_chat_messages_fields.py
+|-- add_chat_session_project_fields.py
+|-- add_project_status_migration.py
+|-- add_vibe_coding_fields_migration.py
+|-- add_vibe_coding_fields.sh
+|-- alembic
+|   `-- versions
+|       |-- 001_conditional_project_tables.py
+|       `-- add_vibe_coding_fields.py
+|-- app
+|   |-- api
+|   |   |-- auth.py
+|   |   |-- chat.py
+|   |   |-- chat_v2.py
+|   |   |-- code_management.py
+|   |   |-- code.py
+|   |   |-- conversations.py
+|   |   |-- enhanced_chat.py
+|   |   |-- enhanced_code.py
+|   |   |-- files.py
+|   |   |-- __init__.py
+|   |   |-- models.py
+|   |   |-- users.py
+|   |   |-- v2
+|   |   |   |-- agent.py
+|   |   |   |-- benchmark.py
+|   |   |   |-- benchmark_tasks.py
+|   |   |   |-- chat.py
+|   |   |   |-- debug.py
+|   |   |   |-- __init__.py
+|   |   |   |-- terminal.py
+|   |   |   |-- vibe.py
+|   |   |   `-- workspace.py
+|   |   |-- websocket_handlers
+|   |   |   |-- __init__.py
+|   |   |   `-- terminal_ws.py
+|   |   `-- websocket.py
+|   |-- app.config.py
+|   |-- cli
+|   |   `-- client.py
+|   |-- config.py
+|   |-- core
+|   |   |-- agents
+|   |   |   `-- code_agent.py
+|   |   |-- ai
+|   |   |   |-- engine.py
+|   |   |   |-- plugin_system.py
+|   |   |   |-- prompt_engine.py
+|   |   |   `-- system_prompts.py
+|   |   |-- ai_engine.py
+|   |   |-- app.core.ai_engine.py
+|   |   |-- auth.py
+|   |   |-- benchmark
+|   |   |   |-- adapters.py
+|   |   |   |-- code_extractor.py
+|   |   |   |-- evaluators.py
+|   |   |   |-- executor.py
+|   |   |   |-- __init__.py
+|   |   |   |-- loaders.py
+|   |   |   |-- session.py
+|   |   |   `-- swe_bench_evaluator.py
+|   |   |-- cache
+|   |   |   `-- cache_manager.py
+|   |   |-- chat
+|   |   |   |-- __init__.py
+|   |   |   `-- router.py
+|   |   |-- code_extractor.py
+|   |   |-- config_manager.py
+|   |   |-- cron_manager.py
+|   |   |-- db
+|   |   |   |-- connection_pool.py
+|   |   |   |-- migration_manager.py
+|   |   |   `-- query_optimizer.py
+|   |   |-- __init__.py
+|   |   |-- intent
+|   |   |   |-- engine.py
+|   |   |   `-- __init__.py  
+|   |   |-- monitoring
+|   |   |   |-- health_check.py
+|   |   |   `-- metrics.py
+|   |   |-- preview
+|   |   |   `-- preview_manager.py
+|   |   |-- rate_limit.py
+|   |   |-- repo
+|   |   |   |-- analyzer.py
+|   |   |   |-- code_utils.py
+|   |   |   |-- importance_analyzer.py
+|   |   |   |-- __init__.py
+|   |   |   |-- summary.py
+|   |   |   `-- tree_builder.py
+|   |   |-- script_executor.py
+|   |   |-- security.py
+|   |   |-- session.py
+|   |   |-- terminal
+|   |   |   `-- pty_manager.py
+|   |   |-- vibe
+|   |   |   `-- app.core.vibeprompt_orchestrator.py
+|   |   `-- web_search
+|   |       `-- __init__.py
+|   |-- db
+|   |   |-- base.py
+|   |   |-- init_db.py
+|   |   |-- __init__.py
+|   |   |-- redis.py
+|   |   `-- session.py
+|   |-- dependencies.py
+|   |-- __init__.py
+|   |-- main.py
+|   |-- models
+|   |   |-- app.models.user.py
+|   |   |-- chat.py
+|   |   |-- code.py
+|   |   |-- config.py
+|   |   |-- file.py
+|   |   |-- __init__.py
+|   |   |-- user.py
+|   |   `-- workspace.py
+|   |-- monitoring
+|   |   `-- __init__.py
+|   |-- plugins
+|   |   `-- ai_providers
+|   |       |-- doubao.py
+|   |       `-- openai_plugin.py
+|   |-- schemas
+|   |   |-- auth.py
+|   |   |-- chat.py
+|   |   |-- code_management.py
+|   |   |-- code.py
+|   |   |-- file.py
+|   |   |-- __init__.py
+|   |   |-- models.py
+|   |   |-- user.py
+|   |   `-- v2
+|   |       |-- agent.py
+|   |       |-- chat.py
+|   |       |-- execution.py
+|   |       |-- __init__.py
+|   |       `-- workspace.py
+|   |-- scripts
+|   |   |-- cleanup_code_tables.py
+|   |   |-- detect_database_state.py
+|   |   |-- manage_db.py
+|   |   |-- migrate_code_tables.py
+|   |   `-- migrate_config.py
+|   |-- services
+|   |   |-- ai_code_service.py
+|   |   |-- ai_service.py
+|   |   |-- bash_script_vibe_service.py
+|   |   |-- chat_service.py
+|   |   |-- code_service.py
+|   |   |-- enhanced_chat_service.py
+|   |   |-- enhanced_code_service.py
+|   |   |-- file_service.py
+|   |   |-- __init__.py
+|   |   |-- project_service.py
+|   |   |-- user_service.py
+|   |   `-- vibe_project_service.py
+|   `-- utils
+|       |-- file_handler.py
+|       |-- i18n.py
+|       |-- __init__.py
+|       `-- markdown.py
+|-- backup_before_vibe_migration_20250708_170512.sql
+|-- benchmark_results
+|   |-- evaluations
+|   |-- exp_20260114_142210_metrics.csv
+|   |-- exp_20260114_142210_results.jsonl
+|   |-- predictions
+|   `-- trajectories
+|-- char_counter.log
+|-- cheapbuy.sh
+|-- check_database_structure.py
+|-- claude_code.py
+|-- client.py
+|-- config
+|   |-- claude_code.yaml
+|   |-- models
+|   |   `-- register.yaml
+|   `-- providers
+|       `-- doubao.yaml
+|-- config.py
+|-- contract_curve.log
+|-- data
+|-- dependencies.py
+|-- deploy.sh
+|-- detect_check_existing_project_structure.py
+|-- detect_database_state.py
+|-- diagnose.py
+|-- diagnose_tool_use.py
+|-- duck_egg_calculator.log
+|-- edgeworth_analysis.log
+|-- enhanced_client_debug.py
+|-- enhanced_client_example.py
+|-- enhanced_test.py
+|-- examples
+|   `-- claude_code_demo.py
+|-- fix_certbot_ssl.sh
+|-- fix_chat_api.sh
+|-- fix_db.py
+|-- generate_key.py
+|-- geometry_solver.log
+|-- hexagon_calculation.log
+|-- init_db.py
+|-- lc_circuit_analysis.log
+|-- lc_circuit_calculation.log
+|-- logs
+|   |-- app.log
+|   |-- error.log
+|   |-- exp_20260114_142210_detailed.log
+|   `-- monitor.log
+|-- main.py
+|-- migrate_code_management.py
+|-- migrate_db.py
+|-- output
+|   |-- 20250621
+|   |   |-- execution_output_2678e142-ed65-4230-b372-2019ee0e1b11_120803.txt
+|   |   |-- execution_output_8597c509-efdb-4e76-84b9-1e1d508f9ec6_114254.txt
+|   |   |-- execution_output_e4e800c9-0aa9-4a58-9571-8dc15354de4a_120718.txt
+|   |   `-- execution_output_f7dc73fd-ba0f-4aeb-90c7-73b334bbaaa2_114254.txt
+|   `-- projects
+|       |-- 710d9561-6488-4955-bc9f-fb3c74c33595
+|       |   |-- execution_result.txt
+|       |   `-- project_info.json
+|       |-- 752f735c-4a06-49a9-8922-59f3bbadda40
+|       |   |-- execution_result.txt
+|       |   `-- project_info.json
+|       |-- a33c1c12-5c8a-4f9a-be7a-e28a121b93c9
+|       |   |-- execution_result.txt
+|       |   `-- project_info.json
+|       |-- a5e4e01a-5aac-4949-9b7a-fc527b97270c
+|       |   |-- execution_result.txt
+|       |   `-- project_info.json
+|       `-- project_20250628_104749
+|           |-- execution_results
+|           |   |-- execution_1.txt
+|           |   |-- execution_2.txt
+|           |   |-- execution_3.txt
+|           |   |-- execution_4.txt
+|           |   `-- execution_5.txt
+|           `-- project_info.json
+|-- physics_calculation.log
+|-- physics_solver.log
+|-- project_test_client.py
+|-- quadratic_solver.log
+|-- quick_test.py
+|-- README.md
+|-- reports
+|   |-- mihua_status_20250621T165905Z.json
+|   |-- mihua_status_20250621T165922Z.json
+|   `-- status_20250621T040718Z.json
+|-- requirements.txt
+|-- scripts
+|   |-- detect_database_state.py
+|   |-- manage_db.py
+|   |-- migrate_code_tables.py
+|   `-- migrate_to_claude_code.py
+|-- scripts.init_db.py
+|-- setop_letsencrypt.sh
+|-- setup_cron_automation.sh
+|-- ss.py
+|-- test_agentic_loop.py
+|-- test_client.py
+|-- test_code_management.py
+|-- test.sh
+`-- walrasian_equilibrium.log
+
+52 directories, 215 files

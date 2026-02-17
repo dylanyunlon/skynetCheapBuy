@@ -1,0 +1,78 @@
+# config/claude_code.yaml
+claude_code:
+  benchmark:
+    work_dir: "/workspace/benchmarks"
+    max_concurrent_tasks: 3
+    default_timeout: 3600
+    
+    swe_bench:
+      enabled: true
+      max_turns: 40
+      
+    mle_bench:
+      enabled: true
+      gpu_support: false
+      
+    git_task_bench:
+      enabled: true
+      max_file_size: 50MB
+      
+  # 工作空间配置
+  workspace:
+    base_path: "/workspace"
+    max_project_size: 104857600  # 100MB
+    allowed_extensions:
+      - .py
+      - .js
+      - .ts
+      - .sh
+      - .yaml
+      - .json
+      - .txt
+      - .md
+      - .env
+      - .dockerfile
+      - .gitignore
+    
+  # 执行配置
+  execution:
+    default_timeout: 300  # 5分钟
+    max_timeout: 3600     # 1小时
+    memory_limit: "512M"
+    cpu_limit: "1.0"
+    
+  # 调试配置
+  debug:
+    max_attempts: 3
+    attempt_delay: 2
+    collect_metrics: true
+    
+  # Agent 配置
+  agents:
+    generation:
+      model: "claude-opus-4-20250514-all"
+      temperature: 0.7
+      max_tokens: 8192
+      
+    debug:
+      model: "claude-opus-4-20250514-all"
+      temperature: 0.3
+      max_tokens: 4096
+      
+  # 安全配置
+  security:
+    sandbox_enabled: true
+    network_isolated: false
+    allowed_commands:
+      - python
+      - pip
+      - node
+      - npm
+      - bash
+      - git
+    
+  # Git 配置
+  git:
+    auto_commit: true
+    default_branch: "main"
+    commit_message_template: "[Claude Code] {action}: {description}"
