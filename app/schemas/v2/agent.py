@@ -68,23 +68,40 @@ class AgenticTaskRequest(BaseModel):
 
 
 class AgenticEventResponse(BaseModel):
-    """Agentic Loop 事件（SSE 推送）"""
-    type: str = Field(..., description="事件类型: start|text|tool_start|tool_result|turn|done|error")
+    """Agentic Loop 事件（SSE 推送）— v3 增强"""
+    type: str = Field(..., description="事件类型: start|text|tool_start|tool_result|file_change|turn|progress|done|error")
     content: Optional[str] = None
     tool: Optional[str] = None
     tool_use_id: Optional[str] = None
     args: Optional[Dict[str, Any]] = None
     result: Optional[str] = None
+    result_meta: Optional[Dict[str, Any]] = None  # v3: 结构化元数据
+    description: Optional[str] = None  # v3: 工具操作描述
     turn: Optional[int] = None
     turns: Optional[int] = None
     total_tool_calls: Optional[int] = None
     duration: Optional[float] = None
     message: Optional[str] = None
     success: Optional[bool] = None
+    # v3: file_change 事件字段
+    action: Optional[str] = None
+    path: Optional[str] = None
+    filename: Optional[str] = None
+    added: Optional[int] = None
+    removed: Optional[int] = None
+    # v3: turn 事件增强字段
+    display: Optional[str] = None
+    detail_items: Optional[List[Dict[str, Any]]] = None
+    summary: Optional[Dict[str, Any]] = None
+    # v3: progress 事件字段
+    max_turns: Optional[int] = None
+    elapsed: Optional[float] = None
+    # v3: done 事件增强
+    file_changes: Optional[List[Dict[str, Any]]] = None
 
 
 class AgenticTaskResult(BaseModel):
-    """Agentic Loop 同步执行结果"""
+    """Agentic Loop 同步执行结果 — v3"""
     success: bool
     turns: int
     total_tool_calls: int
@@ -92,3 +109,4 @@ class AgenticTaskResult(BaseModel):
     final_text: str
     work_dir: str
     events: List[Dict[str, Any]] = []
+    file_changes: List[Dict[str, Any]] = []  # v3: 文件变更日志
