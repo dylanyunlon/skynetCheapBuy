@@ -8,3 +8,5 @@ venv/
 # Runtime files
 server.pid
 logs/*.log
+
+_review/

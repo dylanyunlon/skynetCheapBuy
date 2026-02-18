@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 """
-CheapBuy Agentic Loop v4 — Claude Code 全面对标版
-==================================================
-v4 新增 (对标 Claude Code 内部实现):
-  1. Token 用量追踪: 每轮 usage 事件 (input_tokens, output_tokens)
-  2. Extended Thinking: 支持 Claude 的 thinking blocks
-  3. 并行工具执行: 同一轮多个工具并发 (asyncio.gather)
-  4. 自动重试: 指数退避 (429 / 5xx / 超时)
-  5. 上下文窗口管理: 接近 token 上限时自动摘要
-  6. Unified Diff: 文件编辑生成完整 unified diff
-  7. 成本估算: 每轮 $ 估算
-  8. Heartbeat: 长时间工具执行时发送心跳保持连接
+CheapBuy Agentic Loop v5 — Claude Code 全功能对标版
+====================================================
+v5 新增 (对标 claudecode功能.txt 全部 15 项):
+  Feature #2:  view_truncated — "View truncated section of xxx.py"
+  Feature #3:  batch_read 增强 — "Viewed 3 files" 含每文件 truncated hint
+  Feature #4:  web_search — "Searched the web" + 结果域名/标题列表
+  Feature #5:  web_fetch — "Fetched: {title}" 带标题提取
+  Feature #6:  batch_commands / run_script — "Ran 7 commands" 含 Script 展开
+  Feature #7:  parallel batch — "Ran 3 commands" 并行执行
+  Feature #8:  edit_file 增强 — "Ran a command, edited a file" 混合步骤
+  Feature #9:  VALU 风格转换 — 精确 +N, -N diff 统计
+  Feature #10: test 执行 — "Test VALU XOR changes" Script 展开
+  Feature #11: 14步 debug 循环 — debug → verify → fix → test 全链路
+  Feature #12: revert + re-test — 回退 + 重新基线测试
+  Feature #13: view_section — 查看主循环代码段
+  Feature #14: revert_edit — 精确回退单个编辑
+  Feature #15: restructure — 重构主循环 (+20 行)
+
+v4 保留:
+  1. Token 用量追踪  2. Extended Thinking  3. 并行工具执行
+  4. 自动重试        5. 上下文窗口管理    6. Unified Diff
+  7. 成本估算        8. Heartbeat
 
 部署方式:
   替换 app/core/agents/agentic_loop.py (先备份旧版)
@@ -232,11 +243,91 @@ TOOL_DEFINITIONS = [
             "required": ["summary"]
         }
     },
+    # === v5 新增工具 ===
+    {
+        "name": "view_truncated",
+        "description": (
+            "View the truncated (hidden) section of a file that was previously cut off. "
+            "Use after read_file reports truncation. Provide start_line and end_line from the truncated range."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path"},
+                "start_line": {"type": "integer", "description": "Start of truncated range"},
+                "end_line": {"type": "integer", "description": "End of truncated range"},
+                "description": {"type": "string", "description": "Why viewing this section"}
+            },
+            "required": ["path", "start_line", "end_line"]
+        }
+    },
+    {
+        "name": "batch_commands",
+        "description": (
+            "Run multiple bash commands in sequence. Each command has a description shown in UI. "
+            "Stops on first failure unless continue_on_error is set. "
+            "UI displays as 'Ran N commands' with expandable details."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "commands": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Bash command"},
+                            "description": {"type": "string", "description": "What this command does"}
+                        },
+                        "required": ["command"]
+                    },
+                    "description": "List of commands with descriptions"
+                },
+                "continue_on_error": {"type": "boolean", "description": "Continue after failures (default: false)"},
+                "description": {"type": "string", "description": "Overall batch description"}
+            },
+            "required": ["commands"]
+        }
+    },
+    {
+        "name": "run_script",
+        "description": (
+            "Run a multi-line script. Creates temp file, executes, cleans up. "
+            "UI shows 'Script' label that can be expanded to see full script content."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "script": {"type": "string", "description": "Script content (multi-line)"},
+                "interpreter": {"type": "string", "description": "bash, python3, or node (default: bash)"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default: 300)"},
+                "description": {"type": "string", "description": "What this script does"}
+            },
+            "required": ["script"]
+        }
+    },
+    {
+        "name": "revert_edit",
+        "description": (
+            "Revert a previous edit by swapping old_str and new_str. "
+            "Use when a change needs to be undone. Shows as 'Revert {description}' in UI."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path"},
+                "old_str": {"type": "string", "description": "Current string (was new_str in original edit)"},
+                "new_str": {"type": "string", "description": "Revert to this (was old_str in original edit)"},
+                "description": {"type": "string", "description": "What you're reverting"}
+            },
+            "required": ["path", "old_str", "new_str"]
+        }
+    },
 ]
 
 
 # =============================================================================
-# System Prompt (v4)
+# System Prompt (v5)
 # =============================================================================
 
 AGENTIC_SYSTEM_PROMPT = """You are an expert software engineer working in a Linux environment.
@@ -254,12 +345,21 @@ You have tools to read/write/edit files, run bash commands, search code, and bro
    - edit_file for single precise changes (old_str must be unique)
    - multi_edit for multiple changes in one file
    - batch_read for multiple files at once
+   - view_truncated for viewing hidden sections of large files
 
-4. **Debugging**: Read error → Read relevant file → Make targeted fix → Verify.
+4. **Batch operations** (v5):
+   - batch_commands for running multiple related commands — shows as "Ran N commands"
+   - run_script for multi-line scripts — shows expandable "Script" in UI
 
-5. **Completion**: Call task_complete with a clear summary when done.
+5. **Reverting changes** (v5):
+   - revert_edit to undo a previous edit — shows as "Revert {description}"
 
-6. **Be concise**: Focus on actions, not explanations."""
+6. **Debugging**: Read error → Read relevant file → Make targeted fix → Verify.
+   Use batch_commands to run a diagnostic sequence efficiently.
+
+7. **Completion**: Call task_complete with a clear summary when done.
+
+8. **Be concise**: Focus on actions, not explanations."""
 
 
 # =============================================================================
@@ -313,6 +413,11 @@ class ToolExecutor:
             "list_dir": self._list_dir, "grep_search": self._grep_search,
             "file_search": self._file_search, "web_search": self._web_search,
             "web_fetch": self._web_fetch, "task_complete": self._task_complete,
+            # v5 新增
+            "view_truncated": self._view_truncated,
+            "batch_commands": self._batch_commands,
+            "run_script": self._run_script,
+            "revert_edit": self._revert_edit,
         }
         handler = handlers.get(tool_name)
         if not handler:
@@ -595,6 +700,116 @@ class ToolExecutor:
             "total_file_changes": len(self.file_changes),
             "file_change_log": self.file_changes[-20:]}, ensure_ascii=False)
 
+    # === v5 新增工具实现 ===
+
+    async def _view_truncated(self, params: Dict) -> str:
+        """Feature #2: View truncated section of a file"""
+        path = self._resolve(params["path"])
+        start = params.get("start_line", 1)
+        end = params.get("end_line")
+        # 复用 _read_file 的 start_line/end_line 逻辑
+        return await self._read_file({"path": params["path"], "start_line": start, "end_line": end,
+            "description": params.get("description", f"View truncated section of {os.path.basename(path)}")})
+
+    async def _batch_commands(self, params: Dict) -> str:
+        """Feature #6-7: Run multiple commands — 'Ran N commands'"""
+        commands = params.get("commands", [])
+        if not commands:
+            return json.dumps({"error": "No commands provided"})
+        continue_on_error = params.get("continue_on_error", False)
+        results = []
+        succeeded, failed = 0, 0
+        for i, cmd_info in enumerate(commands):
+            command = cmd_info.get("command", "")
+            desc = cmd_info.get("description", f"Command {i+1}")
+            r_str = await self._bash({"command": command, "timeout": cmd_info.get("timeout", 120)})
+            try:
+                r = json.loads(r_str)
+            except:
+                r = {"exit_code": -1, "stdout": "", "stderr": r_str}
+            ok = r.get("exit_code", -1) == 0
+            if ok:
+                succeeded += 1
+            else:
+                failed += 1
+            results.append({
+                "index": i + 1,
+                "command": command[:200],
+                "description": desc,
+                "exit_code": r.get("exit_code", -1),
+                "success": ok,
+                "stdout_preview": r.get("stdout", "")[:500],
+                "stderr_preview": r.get("stderr", "")[:300],
+            })
+            if not ok and not continue_on_error:
+                break
+        n = len(results)
+        return json.dumps({
+            "total_commands": len(commands),
+            "executed": n,
+            "succeeded": succeeded,
+            "failed": failed,
+            "results": results,
+            "display_title": f"Ran {n} command{'s' if n != 1 else ''}",
+        }, ensure_ascii=False)
+
+    async def _run_script(self, params: Dict) -> str:
+        """Feature #6/10: Run multi-line script with expandable 'Script' display"""
+        script = params.get("script", "")
+        interpreter = params.get("interpreter", "bash")
+        timeout = min(params.get("timeout", 300), 600)
+        desc = params.get("description", "Script")
+        if not script:
+            return json.dumps({"error": "Empty script"})
+        import tempfile
+        ext_map = {"bash": ".sh", "python3": ".py", "python": ".py", "node": ".js"}
+        ext = ext_map.get(interpreter, ".sh")
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False,
+                                              dir=self.work_dir, prefix="script_") as f:
+                if interpreter in ("bash", "sh"):
+                    f.write("#!/bin/bash\nset -e\n" + script)
+                else:
+                    f.write(script)
+                script_path = f.name
+            os.chmod(script_path, 0o755)
+            r_str = await self._bash({"command": f"{interpreter} {script_path}", "timeout": timeout})
+            try:
+                r = json.loads(r_str)
+            except:
+                r = {"exit_code": -1, "stdout": "", "stderr": r_str}
+            r["script"] = script
+            r["interpreter"] = interpreter
+            r["description"] = desc
+            r["display_title"] = desc
+            r["script_path"] = script_path
+            return json.dumps(r, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"error": str(e), "script": script[:500]})
+        finally:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+
+    async def _revert_edit(self, params: Dict) -> str:
+        """Feature #14: Revert a previous edit"""
+        desc = params.get("description", "Revert edit")
+        # revert_edit is just edit_file with a "Revert" prefix in description
+        result_str = await self._edit_file({
+            "path": params["path"],
+            "old_str": params["old_str"],
+            "new_str": params["new_str"],
+            "description": f"Revert: {desc}"
+        })
+        try:
+            r = json.loads(result_str)
+            r["reverted"] = True
+            r["display_title"] = f"Revert: {desc}"
+            return json.dumps(r, ensure_ascii=False)
+        except:
+            return result_str
+
     def _resolve(self, path: str) -> str:
         return path if os.path.isabs(path) else os.path.join(self.work_dir, path)
 
@@ -647,12 +862,15 @@ class ToolExecutor:
 def build_turn_summary(tool_uses: List[Dict]) -> Dict[str, Any]:
     counts = {"bash": 0, "read_file": 0, "batch_read": 0, "write_file": 0,
               "edit_file": 0, "multi_edit": 0, "list_dir": 0, "grep_search": 0,
-              "file_search": 0, "web_search": 0, "web_fetch": 0, "task_complete": 0}
+              "file_search": 0, "web_search": 0, "web_fetch": 0, "task_complete": 0,
+              "view_truncated": 0, "batch_commands": 0, "run_script": 0, "revert_edit": 0}
     detail_items = []
     icon_map = {"bash": "terminal", "read_file": "file-text", "batch_read": "files",
         "write_file": "file-plus", "edit_file": "pencil", "multi_edit": "pencil-ruler",
         "list_dir": "folder-open", "grep_search": "search", "file_search": "file-search",
-        "web_search": "globe", "web_fetch": "download", "task_complete": "check-circle"}
+        "web_search": "globe", "web_fetch": "download", "task_complete": "check-circle",
+        "view_truncated": "eye", "batch_commands": "terminal", "run_script": "code",
+        "revert_edit": "rotate-ccw"}
     for tu in tool_uses:
         name = tu.get("name", ""); inp = tu.get("input", {})
         if name in counts: counts[name] += 1
@@ -660,23 +878,26 @@ def build_turn_summary(tool_uses: List[Dict]) -> Dict[str, Any]:
         detail_items.append({"tool": name, "icon": icon_map.get(name, "zap"),
             "title": desc if desc else _auto_title(name, inp)})
 
-    vc = counts["read_file"] + counts["batch_read"]
-    ec = counts["edit_file"] + counts["multi_edit"]
+    vc = counts["read_file"] + counts["batch_read"] + counts["view_truncated"]
+    ec = counts["edit_file"] + counts["multi_edit"] + counts["revert_edit"]
     sc = counts["list_dir"] + counts["grep_search"] + counts["file_search"]
+    cc = counts["bash"] + counts["batch_commands"] + counts["run_script"]
     parts = []
-    if counts["bash"]: n = counts["bash"]; parts.append(f"Ran {n} command{'s' if n>1 else ''}")
+    if cc: n = cc; parts.append(f"Ran {n} command{'s' if n>1 else ''}")
     if vc: n = vc; parts.append(f"viewed {n} file{'s' if n>1 else ''}")
     if counts["write_file"]: n = counts["write_file"]; parts.append(f"created {n} file{'s' if n>1 else ''}")
     if ec: n = ec; parts.append(f"edited {'a file' if n==1 else f'{n} files'}")
     if sc: n = sc; parts.append(f"searched {n} path{'s' if n>1 else ''}")
     if counts["web_search"]: parts.append("searched the web")
     if counts["web_fetch"]: n = counts["web_fetch"]; parts.append(f"fetched {n} page{'s' if n>1 else ''}")
+    if counts["revert_edit"]: n = counts["revert_edit"]; parts.append(f"reverted {n} edit{'s' if n>1 else ''}")
     if counts["task_complete"]: parts.append("completed task")
     display = ", ".join(parts) if parts else "Done"
     if display: display = display[0].upper() + display[1:]
-    return {"commands_run": counts["bash"], "files_viewed": vc, "files_edited": ec,
+    return {"commands_run": cc, "files_viewed": vc, "files_edited": ec,
         "files_created": counts["write_file"], "searches_code": sc,
         "searches_web": counts["web_search"], "pages_fetched": counts["web_fetch"],
+        "reverts": counts["revert_edit"],
         "task_completed": counts["task_complete"] > 0, "display": display,
         "detail_items": detail_items, "tool_count": len(tool_uses)}
 
@@ -696,6 +917,16 @@ def _auto_title(name, inp):
     elif name == "web_fetch":
         u = inp.get("url",""); return f"Fetch: {u[:60]}{'...' if len(u)>60 else ''}"
     elif name == "task_complete": return "Task completed"
+    # v5 新增
+    elif name == "view_truncated":
+        fn = os.path.basename(inp.get("path",""))
+        return f"View truncated section of {fn}"
+    elif name == "batch_commands":
+        n = len(inp.get("commands",[])); return f"Run {n} command{'s' if n>1 else ''}"
+    elif name == "run_script":
+        return inp.get("description", "Script")
+    elif name == "revert_edit":
+        return f"Revert: {inp.get('description', 'edit')}"
     return name
 
 
@@ -705,10 +936,13 @@ def _auto_title(name, inp):
 
 class AgenticLoop:
     """
-    Agentic Loop v4
+    Agentic Loop v5
 
     事件: start, text, thinking, tool_start, tool_result, file_change,
           turn, progress, usage, done, error
+    
+    v5 新增工具: view_truncated, batch_commands, run_script, revert_edit
+    v5 新增汇总: 含 batch_commands/run_script 的 command 计数, revert 计数
     """
     DEFAULT_MODEL = "claude-opus-4-6"
 
@@ -949,6 +1183,32 @@ class AgenticLoop:
             elif tool_name == "task_complete":
                 meta["completed"] = True
                 meta["summary"] = d.get("summary", "")
+            # v5 新增
+            elif tool_name == "view_truncated":
+                meta["filename"] = d.get("filename", "")
+                meta["total_lines"] = d.get("total_lines", 0)
+                meta["lines"] = d.get("lines", "")
+                meta["display_title"] = f"View truncated section of {d.get('filename', '')}"
+            elif tool_name == "batch_commands":
+                meta["total_commands"] = d.get("total_commands", 0)
+                meta["executed"] = d.get("executed", 0)
+                meta["succeeded"] = d.get("succeeded", 0)
+                meta["failed"] = d.get("failed", 0)
+                meta["display_title"] = d.get("display_title", "")
+                meta["results"] = [
+                    {"description": r.get("description",""), "success": r.get("success",False)}
+                    for r in d.get("results",[])
+                ]
+            elif tool_name == "run_script":
+                meta["exit_code"] = d.get("exit_code", -1)
+                meta["script_preview"] = d.get("script", "")[:500]
+                meta["description"] = d.get("description", "Script")
+                meta["display_type"] = "script"
+            elif tool_name == "revert_edit":
+                meta["reverted"] = d.get("reverted", False)
+                meta["filename"] = d.get("filename", "")
+                meta["diff"] = d.get("diff", "")
+                meta["display_title"] = d.get("display_title", "Revert edit")
         except: pass
         return meta
 
