@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+
+# Virtual environment
+.venv/
+venv/
+
+# Runtime files
+server.pid
+logs/*.log
