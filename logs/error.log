@@ -1,0 +1,26 @@
+Traceback (most recent call last):
+  File "/root/dylan/skynetCheapBuy/skynetCheapBuy/.venv/bin/uvicorn", line 8, in <module>
+    sys.exit(main())
+  File "/root/dylan/skynetCheapBuy/skynetCheapBuy/.venv/lib/python3.10/site-packages/click/core.py", line 1157, in __call__
+    return self.main(*args, **kwargs)
+  File "/root/dylan/skynetCheapBuy/skynetCheapBuy/.venv/lib/python3.10/site-packages/click/core.py", line 1078, in main
+    rv = self.invoke(ctx)
+  File "/root/dylan/skynetCheapBuy/skynetCheapBuy/.venv/lib/python3.10/site-packages/click/core.py", line 1434, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+  File "/root/dylan/skynetCheapBuy/skynetCheapBuy/.venv/lib/python3.10/site-packages/click/core.py", line 783, in invoke
+    return __callback(*args, **kwargs)
+  File "/root/dylan/skynetCheapBuy/skynetCheapBuy/.venv/lib/python3.10/site-packages/uvicorn/main.py", line 416, in main
+    run(
+  File "/root/dylan/skynetCheapBuy/skynetCheapBuy/.venv/lib/python3.10/site-packages/uvicorn/main.py", line 522, in run
+    config = Config(
+  File "/root/dylan/skynetCheapBuy/skynetCheapBuy/.venv/lib/python3.10/site-packages/uvicorn/config.py", line 285, in __init__
+    self.configure_logging()
+  File "/root/dylan/skynetCheapBuy/skynetCheapBuy/.venv/lib/python3.10/site-packages/uvicorn/config.py", line 409, in configure_logging
+    logging.config.fileConfig(
+  File "/usr/lib/python3.10/logging/config.py", line 72, in fileConfig
+    formatters = _create_formatters(cp)
+  File "/usr/lib/python3.10/logging/config.py", line 105, in _create_formatters
+    flist = cp["formatters"]["keys"]
+  File "/usr/lib/python3.10/configparser.py", line 965, in __getitem__
+    raise KeyError(key)
+KeyError: 'formatters'
