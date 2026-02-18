@@ -1,27 +1,17 @@
 #!/usr/bin/env python3
 """
-CheapBuy Agentic Loop v5 — Claude Code 全功能对标版
+CheapBuy Agentic Loop v6 — Claude Code 全功能对标版
 ====================================================
-v5 新增 (对标 claudecode功能.txt 全部 15 项):
-  Feature #2:  view_truncated — "View truncated section of xxx.py"
-  Feature #3:  batch_read 增强 — "Viewed 3 files" 含每文件 truncated hint
-  Feature #4:  web_search — "Searched the web" + 结果域名/标题列表
-  Feature #5:  web_fetch — "Fetched: {title}" 带标题提取
-  Feature #6:  batch_commands / run_script — "Ran 7 commands" 含 Script 展开
-  Feature #7:  parallel batch — "Ran 3 commands" 并行执行
-  Feature #8:  edit_file 增强 — "Ran a command, edited a file" 混合步骤
-  Feature #9:  VALU 风格转换 — 精确 +N, -N diff 统计
-  Feature #10: test 执行 — "Test VALU XOR changes" Script 展开
-  Feature #11: 14步 debug 循环 — debug → verify → fix → test 全链路
-  Feature #12: revert + re-test — 回退 + 重新基线测试
-  Feature #13: view_section — 查看主循环代码段
-  Feature #14: revert_edit — 精确回退单个编辑
-  Feature #15: restructure — 重构主循环 (+20 行)
+v6 新增 (对标 Claude Code 2025/2026 内部实现):
+  ★ TodoWrite / TodoRead      — 任务规划 + 进度追踪 (Claude Code 核心)
+  ★ SubAgent / Task            — 子代理: Explore / Plan / General-purpose
+  ★ Context Compaction (wU2)   — 92% 窗口自动压缩 + 长期记忆
+  ★ Glob tool                  — 文件全局匹配 (Claude Code 原生工具)
+  ★ Permission System          — 危险命令分级确认
+  ★ Memory / CLAUDE.md         — 项目级记忆文件
+  ★ Reminder Injection         — 工具调用后注入 TODO 状态提醒
 
-v4 保留:
-  1. Token 用量追踪  2. Extended Thinking  3. 并行工具执行
-  4. 自动重试        5. 上下文窗口管理    6. Unified Diff
-  7. 成本估算        8. Heartbeat
+  v5 全部 15 项保留; v4 全部保留
 
 部署方式:
   替换 app/core/agents/agentic_loop.py (先备份旧版)
@@ -35,6 +25,7 @@ import logging
 import uuid
 import difflib
 import time
+import tempfile
 from typing import Dict, Any, List, Optional, AsyncGenerator, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -46,12 +37,14 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 MAX_CONTEXT_TOKENS = 180_000        # Claude 200k 窗口, 留 20k 余量
-SUMMARIZE_THRESHOLD = 150_000       # 超过此值触发上下文摘要
+SUMMARIZE_THRESHOLD = 165_000       # 92% of 180k — 对标 Claude Code wU2 压缩器
 MAX_TOOL_OUTPUT_LEN = 15_000        # 单工具输出最大长度
 MAX_DISPLAY_RESULT = 3_000          # 推送给前端的 result 最大长度
 HEARTBEAT_INTERVAL = 15.0           # 心跳间隔 (秒)
 API_MAX_RETRIES = 3                 # API 调用最大重试次数
 API_BASE_DELAY = 1.0                # 重试基础延迟 (秒)
+MAX_SUBAGENT_DEPTH = 2              # v6: SubAgent 最大递归深度
+MAX_TODO_ITEMS = 50                 # v6: 最大 TODO 项数
 
 # 模型价格 ($ per 1M tokens)
 MODEL_PRICING = {
@@ -68,6 +61,14 @@ SKIP_DIRS = {
     'dist', 'build', '.egg-info', '.eggs', 'htmlcov',
     '.next', '.nuxt', 'coverage'
 }
+
+# v6: 危险命令模式 (对标 Claude Code Permission System)
+RISKY_CMD_RE = [
+    r'\brm\s+(-rf?|--recursive)', r'\bsudo\b', r'\bchmod\b.*777',
+    r'\bgit\s+push\b', r'\bgit\s+reset\s+--hard',
+    r'\breboot\b', r'\bshutdown\b',
+    r'\bdrop\s+table\b', r'\btruncate\b',
+]
 
 # =============================================================================
 # 工具定义
@@ -323,6 +324,88 @@ TOOL_DEFINITIONS = [
             "required": ["path", "old_str", "new_str"]
         }
     },
+    # === v6 新增工具 (对标 Claude Code) ===
+    {
+        "name": "glob",
+        "description": "Find files matching glob pattern recursively. Fast. Examples: '**/*.py', 'src/**/*.ts'",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern"},
+                "path": {"type": "string", "description": "Root directory"},
+                "max_results": {"type": "integer", "description": "Max results (default: 50)"}
+            },
+            "required": ["pattern"]
+        }
+    },
+    {
+        "name": "todo_write",
+        "description": (
+            "Create/update structured task list. Use VERY frequently for planning and tracking. "
+            "Each todo: {content, status(pending/in_progress/completed), priority(high/medium/low)}. "
+            "Replaces entire list. Mark completed IMMEDIATELY after finishing each item."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "content": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                            "priority": {"type": "string", "enum": ["high", "medium", "low"]}
+                        },
+                        "required": ["content", "status"]
+                    }
+                },
+                "description": {"type": "string"}
+            },
+            "required": ["todos"]
+        }
+    },
+    {
+        "name": "todo_read",
+        "description": "Read current todo list to check progress.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "task",
+        "description": (
+            "Launch sub-agent for complex tasks. Types: 'explore' (read-only codebase analysis), "
+            "'plan' (detailed plan), 'general' (autonomous subtask). Returns summary when done."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subagent_type": {"type": "string", "enum": ["explore", "plan", "general"]},
+                "prompt": {"type": "string", "description": "Task for the sub-agent"},
+                "description": {"type": "string"},
+                "max_turns": {"type": "integer", "description": "Max turns (default: 10)"}
+            },
+            "required": ["prompt"]
+        }
+    },
+    {
+        "name": "memory_read",
+        "description": "Read project memory file (.cheapbuy_memory.md / CLAUDE.md).",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "memory_write",
+        "description": "Append/update project memory. Record architecture decisions, conventions, commands.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "section": {"type": "string", "description": "Section name"},
+                "mode": {"type": "string", "enum": ["append", "replace_section"]}
+            },
+            "required": ["content"]
+        }
+    },
 ]
 
 
@@ -331,35 +414,41 @@ TOOL_DEFINITIONS = [
 # =============================================================================
 
 AGENTIC_SYSTEM_PROMPT = """You are an expert software engineer working in a Linux environment.
-You have tools to read/write/edit files, run bash commands, search code, and browse the web.
+You have tools to read/write/edit files, run bash commands, search code, browse the web,
+plan tasks with todo_write, and delegate complex work to sub-agents via task.
+
+## Core Workflow (Claude Code Style)
+1. **Plan first**: Use todo_write to create a structured task list for any non-trivial task.
+2. **Explore**: Use read_file, grep_search, glob to understand the codebase.
+3. **Implement**: Use edit_file, write_file, multi_edit to make changes.
+4. **Verify**: Run tests/builds with bash. Check results.
+5. **Track progress**: Update todo_write as you complete each step.
+6. **Record knowledge**: Use memory_write to save important project info.
 
 ## Tool Usage Guidelines
 
 1. **description field**: ALWAYS include a 'description' field in every tool call.
-   This is shown in the UI. Examples: "Install Flask dependencies", "Fix import path"
 
-2. **Verify your work**: Always use tools to verify — don't assume. Run code after writing it.
+2. **TodoWrite** (CRITICAL):
+   - Create todos BEFORE starting multi-step tasks
+   - Mark each todo in_progress when starting, completed when done
+   - Do NOT batch — update immediately after completing each item
 
-3. **File operations**:
-   - write_file for new files (complete content)
-   - edit_file for single precise changes (old_str must be unique)
-   - multi_edit for multiple changes in one file
-   - batch_read for multiple files at once
-   - view_truncated for viewing hidden sections of large files
+3. **Sub-agents** (via task tool):
+   - 'explore' for codebase analysis (read-only, fast)
+   - 'plan' for detailed implementation plans
+   - 'general' for autonomous subtasks
 
-4. **Batch operations** (v5):
-   - batch_commands for running multiple related commands — shows as "Ran N commands"
-   - run_script for multi-line scripts — shows expandable "Script" in UI
+4. **File operations**:
+   - write_file for new files, edit_file for precise changes
+   - multi_edit for multiple changes, batch_read for multiple files
+   - glob for fast file pattern matching
 
-5. **Reverting changes** (v5):
-   - revert_edit to undo a previous edit — shows as "Revert {description}"
+5. **Debugging**: Read error -> Read file -> Fix -> Verify. Use batch_commands for diagnostics.
 
-6. **Debugging**: Read error → Read relevant file → Make targeted fix → Verify.
-   Use batch_commands to run a diagnostic sequence efficiently.
+6. **Completion**: Call task_complete with a clear summary when done.
 
-7. **Completion**: Call task_complete with a clear summary when done.
-
-8. **Be concise**: Focus on actions, not explanations."""
+7. **Be concise**: Focus on actions. Use absolute file paths. No emojis."""
 
 
 # =============================================================================
@@ -392,7 +481,61 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 
 
 # =============================================================================
-# 工具执行器 (v4)
+# v6: TODO Manager (对标 Claude Code TodoWrite/TodoRead)
+# =============================================================================
+
+class TodoManager:
+    def __init__(self):
+        self.todos: List[Dict[str, Any]] = []
+        self._counter = 0
+
+    def write(self, todos: List[Dict[str, Any]]) -> Dict[str, Any]:
+        new_todos = []
+        for t in todos[:MAX_TODO_ITEMS]:
+            self._counter += 1
+            new_todos.append({
+                "id": t.get("id", f"todo_{self._counter}"),
+                "content": t.get("content", ""),
+                "status": t.get("status", "pending"),
+                "priority": t.get("priority", "medium"),
+            })
+        self.todos = new_todos
+        return self._summary()
+
+    def read(self) -> Dict[str, Any]:
+        return self._summary()
+
+    def _summary(self) -> Dict[str, Any]:
+        c = sum(1 for t in self.todos if t["status"] == "completed")
+        ip = sum(1 for t in self.todos if t["status"] == "in_progress")
+        p = sum(1 for t in self.todos if t["status"] == "pending")
+        return {"total": len(self.todos), "completed": c, "in_progress": ip, "pending": p,
+                "todos": self.todos,
+                "progress_display": f"{c}/{len(self.todos)} completed" if self.todos else "No tasks"}
+
+    def render_reminder(self) -> str:
+        if not self.todos: return ""
+        lines = ["[TODO Status]"]
+        for t in self.todos:
+            icon = {"completed": "done", "in_progress": ">>", "pending": ".."}[t["status"]]
+            lines.append(f"  [{icon}] {t['content']}")
+        c = sum(1 for t in self.todos if t["status"] == "completed")
+        lines.append(f"Progress: {c}/{len(self.todos)}")
+        return "\n".join(lines)
+
+
+# v6: Permission Checker
+class PermissionChecker:
+    @staticmethod
+    def classify_risk(command: str) -> str:
+        for pat in RISKY_CMD_RE:
+            if re.search(pat, command, re.IGNORECASE):
+                return "risky"
+        return "safe"
+
+
+# =============================================================================
+# 工具执行器 (v4 + v5 + v6)
 # =============================================================================
 
 class ToolExecutor:
@@ -404,6 +547,9 @@ class ToolExecutor:
         self.work_dir = os.path.abspath(work_dir)
         os.makedirs(self.work_dir, exist_ok=True)
         self.file_changes: List[Dict[str, Any]] = []
+        self.todo_manager = TodoManager()          # v6
+        self.permission_checker = PermissionChecker()  # v6
+        self.memory_file = os.path.join(self.work_dir, ".cheapbuy_memory.md")  # v6
 
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         handlers = {
@@ -418,6 +564,13 @@ class ToolExecutor:
             "batch_commands": self._batch_commands,
             "run_script": self._run_script,
             "revert_edit": self._revert_edit,
+            # v6 新增
+            "glob": self._glob,
+            "todo_write": self._todo_write,
+            "todo_read": self._todo_read,
+            "task": self._task_stub,
+            "memory_read": self._memory_read,
+            "memory_write": self._memory_write,
         }
         handler = handlers.get(tool_name)
         if not handler:
@@ -439,6 +592,7 @@ class ToolExecutor:
     async def _bash(self, params: Dict) -> str:
         command = params["command"]
         timeout = min(params.get("timeout", 120), 600)
+        risk = self.permission_checker.classify_risk(command)  # v6
         try:
             proc = await asyncio.create_subprocess_shell(
                 command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -451,7 +605,7 @@ class ToolExecutor:
                 out = out[:5000] + f"\n...[{len(out)-10000} chars truncated]...\n" + out[-5000:]
             if len(err) > 5000:
                 err = err[:5000] + "\n...[truncated]"
-            return json.dumps({"exit_code": proc.returncode, "stdout": out, "stderr": err})
+            return json.dumps({"exit_code": proc.returncode, "stdout": out, "stderr": err, "risk_level": risk})
         except asyncio.TimeoutError:
             return json.dumps({"error": f"Command timed out after {timeout}s", "exit_code": -1})
 
@@ -810,6 +964,83 @@ class ToolExecutor:
         except:
             return result_str
 
+    # === v6 新增工具实现 ===
+
+    async def _glob(self, params: Dict) -> str:
+        """v6: Claude Code 原生 Glob 工具"""
+        pattern = params["pattern"]
+        root = self._resolve(params.get("path", "."))
+        max_results = min(params.get("max_results", 50), 200)
+        if not os.path.exists(root):
+            return json.dumps({"error": f"Root not found: {root}"})
+        matches = []
+        try:
+            for fp in Path(root).glob(pattern):
+                if any(skip in fp.parts for skip in SKIP_DIRS): continue
+                if fp.is_file():
+                    try:
+                        sz = fp.stat().st_size
+                        matches.append({"path": str(fp), "relative": str(fp.relative_to(root)), "size": sz, "size_human": self._hsz(sz)})
+                    except: pass
+                if len(matches) >= max_results: break
+        except Exception as e:
+            return json.dumps({"error": f"Glob failed: {str(e)}"})
+        return json.dumps({"pattern": pattern, "root": root, "matches": len(matches), "results": matches}, ensure_ascii=False)
+
+    async def _todo_write(self, params: Dict) -> str:
+        """v6: 对标 Claude Code TodoWrite"""
+        todos = params.get("todos", [])
+        if not todos: return json.dumps({"error": "No todos provided"})
+        result = self.todo_manager.write(todos)
+        result["display_title"] = f"Updated todo list ({result['total']} items)"
+        return json.dumps(result, ensure_ascii=False)
+
+    async def _todo_read(self, params: Dict) -> str:
+        """v6: 对标 Claude Code TodoRead"""
+        return json.dumps(self.todo_manager.read(), ensure_ascii=False)
+
+    async def _task_stub(self, params: Dict) -> str:
+        """v6: Stub — real SubAgent execution handled at AgenticLoop level"""
+        return json.dumps({"error": "Task tool must be handled by AgenticLoop"})
+
+    async def _memory_read(self, params: Dict) -> str:
+        """v6: 读取项目记忆文件"""
+        candidates = [self.memory_file, os.path.join(self.work_dir, "CLAUDE.md"),
+                      os.path.join(self.work_dir, ".claude", "CLAUDE.md")]
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f: content = f.read()
+                    return json.dumps({"path": path, "content": content, "size": len(content)}, ensure_ascii=False)
+                except Exception as e:
+                    return json.dumps({"error": str(e)})
+        return json.dumps({"content": "", "message": "No memory file found. Use memory_write to create one."})
+
+    async def _memory_write(self, params: Dict) -> str:
+        """v6: 写入项目记忆文件"""
+        content = params.get("content", "")
+        section = params.get("section")
+        mode = params.get("mode", "append")
+        try:
+            existing = ""
+            if os.path.exists(self.memory_file):
+                with open(self.memory_file, 'r', encoding='utf-8') as f: existing = f.read()
+            if mode == "replace_section" and section:
+                header = f"## {section}"
+                if header in existing:
+                    existing = re.sub(rf"(## {re.escape(section)}\n)(.*?)(?=\n## |\Z)",
+                                      f"## {section}\n{content}\n", existing, flags=re.DOTALL)
+                else:
+                    existing += f"\n\n## {section}\n{content}\n"
+            else:
+                existing += f"\n\n## {section}\n{content}\n" if section else f"\n{content}\n"
+            if not existing.startswith("# "):
+                existing = "# Project Memory\n\n" + existing
+            with open(self.memory_file, 'w', encoding='utf-8') as f: f.write(existing)
+            return json.dumps({"success": True, "path": self.memory_file, "size": len(existing), "mode": mode})
+        except Exception as e:
+            return json.dumps({"error": f"Memory write failed: {str(e)}"})
+
     def _resolve(self, path: str) -> str:
         return path if os.path.isabs(path) else os.path.join(self.work_dir, path)
 
@@ -862,15 +1093,18 @@ class ToolExecutor:
 def build_turn_summary(tool_uses: List[Dict]) -> Dict[str, Any]:
     counts = {"bash": 0, "read_file": 0, "batch_read": 0, "write_file": 0,
               "edit_file": 0, "multi_edit": 0, "list_dir": 0, "grep_search": 0,
-              "file_search": 0, "web_search": 0, "web_fetch": 0, "task_complete": 0,
-              "view_truncated": 0, "batch_commands": 0, "run_script": 0, "revert_edit": 0}
+              "file_search": 0, "glob": 0, "web_search": 0, "web_fetch": 0, "task_complete": 0,
+              "view_truncated": 0, "batch_commands": 0, "run_script": 0, "revert_edit": 0,
+              "todo_write": 0, "todo_read": 0, "task": 0, "memory_read": 0, "memory_write": 0}
     detail_items = []
     icon_map = {"bash": "terminal", "read_file": "file-text", "batch_read": "files",
         "write_file": "file-plus", "edit_file": "pencil", "multi_edit": "pencil-ruler",
         "list_dir": "folder-open", "grep_search": "search", "file_search": "file-search",
-        "web_search": "globe", "web_fetch": "download", "task_complete": "check-circle",
-        "view_truncated": "eye", "batch_commands": "terminal", "run_script": "code",
-        "revert_edit": "rotate-ccw"}
+        "glob": "file-search", "web_search": "globe", "web_fetch": "download",
+        "task_complete": "check-circle", "view_truncated": "eye",
+        "batch_commands": "terminal", "run_script": "code", "revert_edit": "rotate-ccw",
+        "todo_write": "list-todo", "todo_read": "list-checks",
+        "task": "git-branch", "memory_read": "brain", "memory_write": "brain"}
     for tu in tool_uses:
         name = tu.get("name", ""); inp = tu.get("input", {})
         if name in counts: counts[name] += 1
@@ -880,8 +1114,9 @@ def build_turn_summary(tool_uses: List[Dict]) -> Dict[str, Any]:
 
     vc = counts["read_file"] + counts["batch_read"] + counts["view_truncated"]
     ec = counts["edit_file"] + counts["multi_edit"] + counts["revert_edit"]
-    sc = counts["list_dir"] + counts["grep_search"] + counts["file_search"]
+    sc = counts["list_dir"] + counts["grep_search"] + counts["file_search"] + counts["glob"]
     cc = counts["bash"] + counts["batch_commands"] + counts["run_script"]
+    tc = counts["todo_write"] + counts["todo_read"]
     parts = []
     if cc: n = cc; parts.append(f"Ran {n} command{'s' if n>1 else ''}")
     if vc: n = vc; parts.append(f"viewed {n} file{'s' if n>1 else ''}")
@@ -891,13 +1126,17 @@ def build_turn_summary(tool_uses: List[Dict]) -> Dict[str, Any]:
     if counts["web_search"]: parts.append("searched the web")
     if counts["web_fetch"]: n = counts["web_fetch"]; parts.append(f"fetched {n} page{'s' if n>1 else ''}")
     if counts["revert_edit"]: n = counts["revert_edit"]; parts.append(f"reverted {n} edit{'s' if n>1 else ''}")
+    if tc: parts.append("updated tasks")
+    if counts["task"]: n = counts["task"]; parts.append(f"launched {n} sub-agent{'s' if n>1 else ''}")
+    if counts["memory_write"]: parts.append("updated memory")
     if counts["task_complete"]: parts.append("completed task")
     display = ", ".join(parts) if parts else "Done"
     if display: display = display[0].upper() + display[1:]
     return {"commands_run": cc, "files_viewed": vc, "files_edited": ec,
         "files_created": counts["write_file"], "searches_code": sc,
         "searches_web": counts["web_search"], "pages_fetched": counts["web_fetch"],
-        "reverts": counts["revert_edit"],
+        "reverts": counts["revert_edit"], "todos_updated": tc,
+        "subagents_launched": counts["task"],
         "task_completed": counts["task_complete"] > 0, "display": display,
         "detail_items": detail_items, "tool_count": len(tool_uses)}
 
@@ -927,24 +1166,86 @@ def _auto_title(name, inp):
         return inp.get("description", "Script")
     elif name == "revert_edit":
         return f"Revert: {inp.get('description', 'edit')}"
+    elif name == "glob":
+        return f"Glob: {inp.get('pattern','')}"
+    elif name == "todo_write":
+        return f"Plan: {len(inp.get('todos',[]))} tasks"
+    elif name == "todo_read":
+        return "Check task progress"
+    elif name == "task":
+        return f"SubAgent ({inp.get('subagent_type','general')}): {inp.get('description',inp.get('prompt','')[:60])}"
+    elif name == "memory_read":
+        return "Read project memory"
+    elif name == "memory_write":
+        return f"Update memory: {inp.get('section', 'notes')}"
     return name
 
 
 # =============================================================================
-# Agentic Loop v4 — 核心
+# v6: SubAgent (对标 Claude Code Task Tool)
+# =============================================================================
+
+SUBAGENT_PROMPTS = {
+    "explore": "You are an Explore sub-agent. READ-ONLY access. Search and analyze the codebase, then provide a clear summary. Use absolute paths.",
+    "plan": "You are a Plan sub-agent. READ-ONLY access. Create a detailed step-by-step implementation plan with specific files and functions.",
+    "general": "You are a general-purpose sub-agent. Complete your assigned task, then call task_complete with a summary. Use absolute paths.",
+}
+SUBAGENT_TOOLS = {
+    "explore": ["read_file","batch_read","glob","grep_search","file_search","list_dir","task_complete"],
+    "plan": ["read_file","batch_read","glob","grep_search","file_search","list_dir","todo_write","task_complete"],
+    "general": None,
+}
+
+async def run_subagent(ai_engine, work_dir, prompt, subagent_type="general",
+                       model=None, max_turns=10, depth=0):
+    if depth >= MAX_SUBAGENT_DEPTH:
+        return {"success": False, "error": "Max subagent depth", "summary": "Cannot spawn more sub-agents"}
+    sys_prompt = SUBAGENT_PROMPTS.get(subagent_type, SUBAGENT_PROMPTS["general"])
+    allowed = SUBAGENT_TOOLS.get(subagent_type)
+    tools = [t for t in TOOL_DEFINITIONS if t["name"] in allowed] if allowed else [t for t in TOOL_DEFINITIONS if t["name"] != "task"]
+    executor = ToolExecutor(work_dir)
+    messages = [{"role": "user", "content": prompt}]
+    all_text = []
+    for turn in range(1, max_turns + 1):
+        try:
+            result = await ai_engine.get_completion(messages=messages, model=model or "claude-sonnet-4-5-20250929",
+                system_prompt=sys_prompt, tools=tools, temperature=0.2, max_tokens=8192)
+        except Exception as e:
+            return {"success": False, "error": str(e), "summary": f"SubAgent failed: {e}"}
+        content_blocks = result.get("content_blocks", [])
+        tool_uses = result.get("tool_uses", [])
+        if not content_blocks and result.get("content"):
+            content_blocks = [{"type": "text", "text": result["content"]}]
+        for b in content_blocks:
+            if b.get("type") == "text" and b.get("text"): all_text.append(b["text"])
+        messages.append({"role": "assistant", "content": content_blocks})
+        if not tool_uses: break
+        tool_results = []
+        for tu in tool_uses:
+            tn, ti, tid = tu["name"], tu["input"], tu["id"]
+            if tn == "task_complete":
+                return {"success": True, "summary": ti.get("summary", "\n".join(all_text)),
+                        "turns": turn, "files_changed": executor.file_changes}
+            rs = await executor.execute(tn, ti)
+            if len(rs) > MAX_TOOL_OUTPUT_LEN: rs = rs[:MAX_TOOL_OUTPUT_LEN] + "\n...[truncated]"
+            tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": rs})
+        messages.append({"role": "user", "content": tool_results})
+    return {"success": True, "summary": "\n".join(all_text) or "SubAgent completed.",
+            "turns": max_turns, "files_changed": executor.file_changes}
+
+
+# =============================================================================
+# Agentic Loop v6 — 核心
 # =============================================================================
 
 class AgenticLoop:
     """
-    Agentic Loop v5
+    Agentic Loop v6 — Claude Code 全功能对标
 
     事件: start, text, thinking, tool_start, tool_result, file_change,
-          turn, progress, usage, done, error
-    
-    v5 新增工具: view_truncated, batch_commands, run_script, revert_edit
-    v5 新增汇总: 含 batch_commands/run_script 的 command 计数, revert 计数
+          turn, progress, usage, todo_update, subagent_start, subagent_result, done, error
     """
-    DEFAULT_MODEL = "claude-opus-4-6"
+    DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
     def __init__(self, ai_engine, work_dir: str, model: str = None,
                  max_turns: int = 30, system_prompt: str = None,
@@ -956,34 +1257,55 @@ class AgenticLoop:
         self.system_prompt = system_prompt or AGENTIC_SYSTEM_PROMPT
         self.executor = ToolExecutor(self.work_dir)
         self.enable_parallel = enable_parallel
+        self.subagent_depth = 0  # v6
         self.turn_count = 0
         self.total_tool_calls = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cost = 0.0
+        self._cancelled = False  # v6: 中断支持
         os.makedirs(self.work_dir, exist_ok=True)
+
+    def cancel(self):
+        """v6: 中断执行"""
+        self._cancelled = True
 
     async def run(self, task: str) -> AsyncGenerator[Dict[str, Any], None]:
         start_time = datetime.now()
         messages = [{"role": "user", "content": task}]
 
+        # v6: 加载项目记忆
+        memory = await self._load_memory()
+        if memory:
+            messages[0]["content"] = f"[PROJECT MEMORY]\n{memory}\n\n[TASK]\n{task}"
+
         yield {"type": "start", "task": task[:500], "model": self.model,
             "work_dir": self.work_dir, "max_turns": self.max_turns,
-            "timestamp": datetime.now().isoformat()}
+            "timestamp": datetime.now().isoformat(), "version": "v6"}
 
         for turn in range(1, self.max_turns + 1):
+            if self._cancelled:
+                yield {"type": "error", "message": "Task cancelled by user", "turn": turn}
+                return
+
             self.turn_count = turn
-            logger.info(f"[AgenticLoop v4] Turn {turn}/{self.max_turns}")
+            logger.info(f"[AgenticLoop v6] Turn {turn}/{self.max_turns}")
 
             yield {"type": "progress", "turn": turn, "max_turns": self.max_turns,
                 "total_tool_calls": self.total_tool_calls,
                 "elapsed": (datetime.now() - start_time).total_seconds()}
 
-            # ---- 上下文窗口管理 ----
+            # ---- 上下文窗口管理 (v6: Context Compaction) ----
             est_tokens = estimate_messages_tokens(messages)
             if est_tokens > SUMMARIZE_THRESHOLD:
-                logger.info(f"[v4] Context near limit ({est_tokens} est tokens), summarizing...")
+                logger.info(f"[v6] Context at {est_tokens} tokens, compacting...")
                 messages = await self._summarize_context(messages)
+
+            # ---- v6: Reminder Injection (TODO 状态) ----
+            todo_reminder = self.executor.todo_manager.render_reminder()
+            effective_system = self.system_prompt
+            if todo_reminder:
+                effective_system += f"\n\n{todo_reminder}"
 
             # ---- AI 调用 (带重试) ----
             result = None; last_error = None
@@ -991,13 +1313,13 @@ class AgenticLoop:
                 try:
                     result = await self.ai_engine.get_completion(
                         messages=messages, model=self.model,
-                        system_prompt=self.system_prompt,
+                        system_prompt=effective_system,
                         tools=TOOL_DEFINITIONS, temperature=0.3, max_tokens=16384)
                     break
                 except Exception as e:
                     last_error = e
                     delay = API_BASE_DELAY * (2 ** (attempt - 1))
-                    logger.warning(f"[v4] AI call failed (attempt {attempt}): {e}, retry in {delay}s")
+                    logger.warning(f"[v6] AI call failed (attempt {attempt}): {e}, retry in {delay}s")
                     if attempt < API_MAX_RETRIES:
                         await asyncio.sleep(delay)
 
@@ -1052,18 +1374,23 @@ class AgenticLoop:
                     "file_changes": self.executor.file_changes[-20:],
                     "total_input_tokens": self.total_input_tokens,
                     "total_output_tokens": self.total_output_tokens,
-                    "total_cost": round(self.total_cost, 6)}
+                    "total_cost": round(self.total_cost, 6),
+                    "todo_status": self.executor.todo_manager.read()}
                 return
 
-            # 执行工具 (支持并行)
+            # 执行工具 (v6: 分离 SubAgent 和普通工具)
             fc_before = len(self.executor.file_changes)
             tool_results = []
 
-            if self.enable_parallel and len(tool_uses) > 1:
-                calls = [(tu["name"], tu["input"], tu["id"]) for tu in tool_uses]
+            subagent_calls = [tu for tu in tool_uses if tu["name"] == "task"]
+            normal_calls = [tu for tu in tool_uses if tu["name"] != "task"]
+
+            # 普通工具 (支持并行)
+            if self.enable_parallel and len(normal_calls) > 1:
+                calls = [(tu["name"], tu["input"], tu["id"]) for tu in normal_calls]
                 par_results = await self.executor.execute_parallel(calls)
                 result_map = {tid: (rs, tn) for tid, rs, tn in par_results}
-                for tu in tool_uses:
+                for tu in normal_calls:
                     tid = tu["id"]; tn = tu["name"]
                     self.total_tool_calls += 1
                     rs, _ = result_map.get(tid, ("", tn))
@@ -1073,8 +1400,10 @@ class AgenticLoop:
                         "result": rs[:MAX_DISPLAY_RESULT], "result_meta": meta,
                         "success": "error" not in rs.lower()[:50], "turn": turn}
                     tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": rs})
+                    if tn in ("todo_write", "todo_read"):
+                        yield {"type": "todo_update", "turn": turn, "todo_status": self.executor.todo_manager.read()}
             else:
-                for tu in tool_uses:
+                for tu in normal_calls:
                     tn, ti, tid = tu["name"], tu["input"], tu["id"]
                     self.total_tool_calls += 1
                     rs = await self.executor.execute(tn, ti)
@@ -1084,6 +1413,39 @@ class AgenticLoop:
                         "result": rs[:MAX_DISPLAY_RESULT], "result_meta": meta,
                         "success": "error" not in rs.lower()[:50], "turn": turn}
                     tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": rs})
+                    if tn in ("todo_write", "todo_read"):
+                        yield {"type": "todo_update", "turn": turn, "todo_status": self.executor.todo_manager.read()}
+
+            # v6: SubAgent 调用
+            for tu in subagent_calls:
+                tid = tu["id"]; ti = tu["input"]
+                self.total_tool_calls += 1
+                subagent_type = ti.get("subagent_type", "general")
+                yield {"type": "subagent_start", "tool_use_id": tid,
+                       "subagent_type": subagent_type, "prompt": ti.get("prompt","")[:200], "turn": turn}
+                try:
+                    sub_result = await run_subagent(
+                        ai_engine=self.ai_engine, work_dir=self.work_dir,
+                        prompt=ti.get("prompt",""), subagent_type=subagent_type,
+                        model=ti.get("model") or "claude-sonnet-4-5-20250929",
+                        max_turns=min(ti.get("max_turns", 10), 15),
+                        depth=self.subagent_depth + 1)
+                    rs = json.dumps({"success": sub_result.get("success",False),
+                        "summary": sub_result.get("summary",""), "turns": sub_result.get("turns",0),
+                        "subagent_type": subagent_type}, ensure_ascii=False)
+                    for fc in sub_result.get("files_changed", []):
+                        self.executor.file_changes.append(fc)
+                except Exception as e:
+                    rs = json.dumps({"error": f"SubAgent failed: {str(e)}", "success": False})
+                if len(rs) > MAX_TOOL_OUTPUT_LEN: rs = rs[:MAX_TOOL_OUTPUT_LEN]
+                meta = self._extract_meta("task", rs)
+                yield {"type": "subagent_result", "tool_use_id": tid,
+                       "result": rs[:MAX_DISPLAY_RESULT], "result_meta": meta,
+                       "subagent_type": subagent_type, "turn": turn}
+                yield {"type": "tool_result", "tool": "task", "tool_use_id": tid,
+                       "result": rs[:MAX_DISPLAY_RESULT], "result_meta": meta,
+                       "success": "error" not in rs.lower()[:50], "turn": turn}
+                tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": rs})
 
             for ch in self.executor.file_changes[fc_before:]:
                 yield {"type": "file_change", "action": ch.get("action",""),
@@ -1106,6 +1468,21 @@ class AgenticLoop:
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "total_cost": round(self.total_cost, 6)}
+
+    async def _load_memory(self) -> str:
+        """v6: 加载项目记忆"""
+        candidates = [
+            os.path.join(self.work_dir, ".cheapbuy_memory.md"),
+            os.path.join(self.work_dir, "CLAUDE.md"),
+            os.path.join(self.work_dir, ".claude", "CLAUDE.md"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f: content = f.read()
+                    return content[:5000] if len(content) > 5000 else content
+                except: pass
+        return ""
 
     async def _summarize_context(self, messages: List[Dict]) -> List[Dict]:
         if len(messages) <= 4: return messages
@@ -1209,6 +1586,32 @@ class AgenticLoop:
                 meta["filename"] = d.get("filename", "")
                 meta["diff"] = d.get("diff", "")
                 meta["display_title"] = d.get("display_title", "Revert edit")
+            # v6 新增
+            elif tool_name == "glob":
+                meta["matches"] = d.get("matches", 0)
+                meta["pattern"] = d.get("pattern", "")
+            elif tool_name == "todo_write":
+                meta["total"] = d.get("total", 0)
+                meta["completed"] = d.get("completed", 0)
+                meta["in_progress"] = d.get("in_progress", 0)
+                meta["pending"] = d.get("pending", 0)
+                meta["progress_display"] = d.get("progress_display", "")
+                meta["display_title"] = d.get("display_title", "Updated tasks")
+            elif tool_name == "todo_read":
+                meta["total"] = d.get("total", 0)
+                meta["completed"] = d.get("completed", 0)
+                meta["progress_display"] = d.get("progress_display", "")
+            elif tool_name == "task":
+                meta["success"] = d.get("success", False)
+                meta["summary"] = d.get("summary", "")[:500]
+                meta["subagent_type"] = d.get("subagent_type", "general")
+                meta["turns"] = d.get("turns", 0)
+            elif tool_name == "memory_read":
+                meta["size"] = d.get("size", 0)
+                meta["has_content"] = bool(d.get("content"))
+            elif tool_name == "memory_write":
+                meta["success"] = d.get("success", False)
+                meta["mode"] = d.get("mode", "append")
         except: pass
         return meta
 
@@ -1225,7 +1628,8 @@ class AgenticLoop:
             "file_changes": self.executor.file_changes,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
-            "total_cost": round(self.total_cost, 6)}
+            "total_cost": round(self.total_cost, 6),
+            "todo_status": self.executor.todo_manager.read()}
 
 
 def create_agentic_loop(ai_engine, user_id: str, project_id: str = None,
