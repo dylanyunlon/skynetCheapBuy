@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 """
-CheapBuy Agentic Loop v7 — Claude Code 全功能对标版 (完整重构)
+CheapBuy Agentic Loop v8 — Claude Code 全功能对标版 (v8 完整升级)
 ===============================================================
-v7 新增 (对标 Claude Code 2025/2026 最新内部架构):
+v8 新增 (对标 claudecode功能.txt Feature #10-#15):
 
+  ★ DebugAgent        — 自动调试循环 (run → diagnose → fix → verify)
+  ★ RevertManager     — 编辑历史追踪 + 安全回退
+  ★ DiffTracker       — 详细 +N/-M 变更追踪 (perf_takehome.py, +3, -4)
+  ★ TestRunner        — 结构化测试执行与结果解析
+  ★ CorrectnessCheck  — 输出正确性对比验证
+  ★ ChunkScheduler    — 工具调用交错调度优化
+  ★ PipelineOptimizer — 批量读取/命令合并
+  ★ ExecutionTracker  — Claude Code 风格 turn 摘要生成
+
+v7 全部保留:
   ★ ToolRegistry        — 集中式工具注册, 分类, 权限, 统计
   ★ ContextManager      — 精确 token 估算, 智能上下文压缩
   ★ EventBuilder        — 标准化 SSE 事件流
@@ -21,12 +31,11 @@ v7 新增 (对标 Claude Code 2025/2026 最新内部架构):
 
 部署方式:
   1. 备份当前 app/core/agents/agentic_loop.py
-  2. 复制新模块到 app/core/agents/:
-     - tool_registry.py
-     - context_manager.py
-     - event_stream.py
-     - permission_gate.py
-  3. 替换 agentic_loop.py 为本文件
+  2. 新增模块到 app/core/agents/:
+     - debug_agent.py     (DebugAgent, RevertManager, DiffTracker, TestRunner)
+     - loop_scheduler.py  (ChunkScheduler, PipelineOptimizer, ExecutionTracker)
+  3. 更新 __init__.py 导出
+  4. 替换 agentic_loop.py 为本文件
 """
 
 import os
@@ -48,6 +57,8 @@ from .context_manager import (
 )
 from .event_stream import EventBuilder, EventType, format_sse
 from .permission_gate import PermissionGate, RiskLevel
+from .debug_agent import DebugAgent, RevertManager, DiffTracker, TestRunner
+from .loop_scheduler import ChunkScheduler, PipelineOptimizer, ExecutionTracker, ScheduledCall
 
 logger = logging.getLogger(__name__)
 
@@ -518,13 +529,17 @@ class ToolExecutor:
     MAX_TAIL_LINES = 100
 
     def __init__(self, work_dir: str, tool_registry: ToolRegistry = None,
-                 permission_gate: PermissionGate = None):
+                 permission_gate: PermissionGate = None,
+                 revert_manager: RevertManager = None,
+                 diff_tracker: DiffTracker = None):
         self.work_dir = os.path.abspath(work_dir)
         os.makedirs(self.work_dir, exist_ok=True)
         self.file_changes: List[Dict[str, Any]] = []
         self.todo_manager = TodoManager()
         self.permission_gate = permission_gate or PermissionGate()
         self.tool_registry = tool_registry
+        self.revert_manager = revert_manager or RevertManager()
+        self.diff_tracker = diff_tracker or DiffTracker()
         self.memory_file = os.path.join(self.work_dir, ".cheapbuy_memory.md")
 
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
@@ -708,6 +723,17 @@ class ToolExecutor:
             added, removed = self._diff_stats(old_s, new_s)
             fn = os.path.basename(path)
             udiff = self._unified_diff(content, new_content, fn)
+            # v8: Record edit for revert support
+            self.revert_manager.record_edit(
+                path=path, old_content=content, new_content=new_content,
+                description=params.get("description", f"Edit {fn}"),
+                tool_name="edit_file",
+            )
+            # v8: Track diff for summary
+            self.diff_tracker.record_change(
+                path=path, old_content=content, new_content=new_content,
+                description=params.get("description", f"Edit {fn}"),
+            )
             self.file_changes.append({"action": "edited", "path": path, "filename": fn,
                                       "added": added, "removed": removed})
             return json.dumps({"success": True, "path": path, "filename": fn,
@@ -1345,9 +1371,17 @@ async def run_subagent(ai_engine, work_dir, prompt, subagent_type="general",
 
 class AgenticLoop:
     """
-    Agentic Loop v7 — Claude Code 全功能对标 (完整重构)
+    Agentic Loop v8 — Claude Code 全功能对标 (v8 完整升级)
 
-    v7 新增:
+    v8 新增:
+      - DebugAgent 集成 (自动调试循环, Feature #10-#14)
+      - RevertManager 集成 (编辑历史 + 安全回退)
+      - DiffTracker 集成 (详细 +N/-M 变更追踪, Feature #8-9)
+      - ChunkScheduler 集成 (工具调用交错调度, Feature #15)
+      - ExecutionTracker 集成 (Claude Code 风格 turn 摘要)
+      - TestRunner 集成 (结构化测试执行, Feature #10)
+
+    v7 全部保留:
       - ToolRegistry 集成 (工具统计, 分类查询)
       - ContextManager 集成 (精确 token, 智能压缩)
       - EventBuilder 集成 (标准化事件流)
@@ -1357,10 +1391,11 @@ class AgenticLoop:
       - 心跳支持避免长连接断开
       - 会话 metrics 全面统计
 
-    事件类型 (v7 完整):
+    事件类型 (v8 完整):
       start, text, thinking, tool_start, tool_result, file_change,
       turn, progress, usage, todo_update, subagent_start, subagent_result,
-      context_compact, approval_needed, done, error, heartbeat
+      context_compact, approval_needed, done, error, heartbeat,
+      debug_start, debug_result, test_result, revert, diff_summary
     """
     DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
@@ -1375,18 +1410,30 @@ class AgenticLoop:
         self.enable_parallel = enable_parallel
         self.subagent_depth = 0
 
-        # v7: New module instances
+        # v7: Core module instances
         self.tool_registry = ToolRegistry()
         self.tool_registry.register_all(TOOL_DEFINITIONS)
         self.context_manager = ContextManager()
         self.event_builder = EventBuilder()
         self.permission_gate = PermissionGate()
 
-        # v7: ToolExecutor with new modules
+        # v8: New module instances
+        self.revert_manager = RevertManager()
+        self.diff_tracker = DiffTracker()
+        self.debug_agent = DebugAgent(
+            work_dir=self.work_dir,
+            revert_manager=self.revert_manager,
+        )
+        self.chunk_scheduler = ChunkScheduler()
+        self.execution_tracker = ExecutionTracker()
+
+        # v7: ToolExecutor with modules (v8: + revert_manager, diff_tracker)
         self.executor = ToolExecutor(
             self.work_dir,
             tool_registry=self.tool_registry,
             permission_gate=self.permission_gate,
+            revert_manager=self.revert_manager,
+            diff_tracker=self.diff_tracker,
         )
 
         # Session metrics
@@ -1797,6 +1844,10 @@ class AgenticLoop:
             "todo_status": self.executor.todo_manager.read(),
             # v7: Tool registry stats
             "tool_stats": self.tool_registry.get_stats(),
+            # v8: Diff summary and debug history
+            "diff_summary": self.diff_tracker.get_summary(),
+            "revert_history": self.revert_manager.get_history(limit=20),
+            "debug_history": self.debug_agent.get_debug_summary(),
         }
 
 
