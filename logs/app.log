@@ -7871,3 +7871,52 @@ WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[%(param_1)s, %(param_2)s]) AND pg
 2026-02-18 22:07:13,694 - app.main - WARNING - ⚠️ Failed to register Vibe Coding routes: No module named 'app.core.vibe.vibe_coding_processor'
 2026-02-18 22:07:13,695 - app.main - INFO - Continuing without Vibe Coding functionality...
 2026-02-18 22:07:13,695 - app.main - INFO - Starting ChatBot API with Vibe Coding Architecture...
+2026-02-19 20:58:01,641 - app.main - INFO - Registering V2 Unified Architecture routes...
+2026-02-19 20:58:01,660 - app.main - INFO - Registering legacy routes for compatibility...
+2026-02-19 20:58:01,983 - app.main - INFO - Additional V2 routes registered successfully
+2026-02-19 20:58:01,984 - app.main - INFO - Attempting to import Vibe Coding routes...
+2026-02-19 20:58:01,984 - app.main - WARNING - ⚠️ Failed to register Vibe Coding routes: No module named 'app.core.vibe.vibe_coding_processor'
+2026-02-19 20:58:01,984 - app.main - INFO - Continuing without Vibe Coding functionality...
+2026-02-19 20:58:01,985 - app.main - INFO - Starting ChatBot API with Vibe Coding Architecture...
+2026-02-19 20:58:02,044 - sqlalchemy.engine.Engine - INFO - select pg_catalog.version()
+2026-02-19 20:58:02,045 - sqlalchemy.engine.Engine - INFO - [raw sql] {}
+2026-02-19 20:58:02,047 - sqlalchemy.engine.Engine - INFO - select current_schema()
+2026-02-19 20:58:02,048 - sqlalchemy.engine.Engine - INFO - [raw sql] {}
+2026-02-19 20:58:02,050 - sqlalchemy.engine.Engine - INFO - show standard_conforming_strings
+2026-02-19 20:58:02,050 - sqlalchemy.engine.Engine - INFO - [raw sql] {}
+2026-02-19 20:58:02,058 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-02-19 20:58:02,059 - sqlalchemy.engine.Engine - INFO - SELECT pg_catalog.pg_class.relname 
+FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[%(param_1)s, %(param_2)s]) AND pg_catalog.pg_class.relpersistence != %(relpersistence_1)s AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != %(nspname_1)s
+2026-02-19 20:58:02,059 - sqlalchemy.engine.Engine - INFO - [generated in 0.00079s] {'param_1': 'r', 'param_2': 'p', 'relpersistence_1': 't', 'nspname_1': 'pg_catalog'}
+2026-02-19 20:58:02,078 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-02-19 20:58:02,085 - app.db.init_db - INFO - All required tables exist
+2026-02-19 20:58:02,086 - app.main - INFO - Initializing Vibe Coding components...
+2026-02-19 20:58:02,086 - app.main - INFO - Intent engine initialized successfully
+2026-02-19 20:58:02,159 - app.main - INFO - Chat router initialized successfully
+2026-02-19 20:58:02,177 - app.main - INFO - Shutting down ChatBot API...
+2026-02-19 20:58:17,312 - app.main - INFO - Registering V2 Unified Architecture routes...
+2026-02-19 20:58:17,329 - app.main - INFO - Registering legacy routes for compatibility...
+2026-02-19 20:58:17,573 - app.main - INFO - Additional V2 routes registered successfully
+2026-02-19 20:58:17,574 - app.main - INFO - Attempting to import Vibe Coding routes...
+2026-02-19 20:58:17,575 - app.main - WARNING - ⚠️ Failed to register Vibe Coding routes: No module named 'app.core.vibe.vibe_coding_processor'
+2026-02-19 20:58:17,575 - app.main - INFO - Continuing without Vibe Coding functionality...
+2026-02-19 20:58:17,576 - app.main - INFO - Starting ChatBot API with Vibe Coding Architecture...
+2026-02-19 20:58:17,588 - sqlalchemy.engine.Engine - INFO - select pg_catalog.version()
+2026-02-19 20:58:17,588 - sqlalchemy.engine.Engine - INFO - [raw sql] {}
+2026-02-19 20:58:17,590 - sqlalchemy.engine.Engine - INFO - select current_schema()
+2026-02-19 20:58:17,590 - sqlalchemy.engine.Engine - INFO - [raw sql] {}
+2026-02-19 20:58:17,590 - sqlalchemy.engine.Engine - INFO - show standard_conforming_strings
+2026-02-19 20:58:17,591 - sqlalchemy.engine.Engine - INFO - [raw sql] {}
+2026-02-19 20:58:17,596 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-02-19 20:58:17,596 - sqlalchemy.engine.Engine - INFO - SELECT pg_catalog.pg_class.relname 
+FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[%(param_1)s, %(param_2)s]) AND pg_catalog.pg_class.relpersistence != %(relpersistence_1)s AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != %(nspname_1)s
+2026-02-19 20:58:17,596 - sqlalchemy.engine.Engine - INFO - [generated in 0.00039s] {'param_1': 'r', 'param_2': 'p', 'relpersistence_1': 't', 'nspname_1': 'pg_catalog'}
+2026-02-19 20:58:17,601 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-02-19 20:58:17,601 - app.db.init_db - INFO - All required tables exist
+2026-02-19 20:58:17,602 - app.main - INFO - Initializing Vibe Coding components...
+2026-02-19 20:58:17,602 - app.main - INFO - Intent engine initialized successfully
+2026-02-19 20:58:17,620 - app.main - INFO - Chat router initialized successfully
+2026-02-19 20:58:18,623 - app.main - ERROR - Database health check failed: Textual SQL expression 'SELECT 1' should be explicitly declared as text('SELECT 1')
+2026-02-19 20:58:18,668 - app.main - ERROR - Database health check failed: Textual SQL expression 'SELECT 1' should be explicitly declared as text('SELECT 1')

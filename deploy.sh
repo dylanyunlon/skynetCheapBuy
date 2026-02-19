@@ -6,6 +6,7 @@
 #   bash deploy.sh              # 完整部署（首次 or 日常更新）
 #   bash deploy.sh --restart    # 仅重启后端服务
 #   bash deploy.sh --pull       # 仅拉代码
+#   bash deploy.sh --local       # 部署本地代码（不拉取 git，保护本地修改）
 #   bash deploy.sh --stop       # 停止后端服务
 #   bash deploy.sh --status     # 查看所有服务状态
 #   bash deploy.sh --build-frontend  # 构建前端
@@ -275,9 +276,24 @@ pull_code() {
     if [ -d "${PROJECT_DIR}/.git" ]; then
         cd "${PROJECT_DIR}"
         log_info "拉取后端代码..."
-        git stash 2>/dev/null || true
-        git pull origin ${GIT_BRANCH} 2>&1
-        log_info "后端代码更新完成"
+
+        # 检查是否有未提交的本地修改
+        if git diff --quiet && git diff --cached --quiet; then
+            # 没有本地修改，安全拉取
+            git pull origin ${GIT_BRANCH} 2>&1
+            log_info "后端代码更新完成"
+        else
+            # 有本地修改 —— 使用 rebase + autostash（自动恢复本地修改）
+            log_warn "检测到本地未提交的修改，使用 autostash 保护..."
+            git pull --rebase --autostash origin ${GIT_BRANCH} 2>&1 || {
+                # 如果 autostash 冲突，提示用户
+                log_error "拉取代码时发生冲突！请手动解决:"
+                log_error "  cd ${PROJECT_DIR} && git stash pop && git diff"
+                log_warn "跳过代码拉取，使用本地版本继续部署"
+                git rebase --abort 2>/dev/null || true
+            }
+            log_info "后端代码更新完成（本地修改已保留）"
+        fi
     else
         log_warn "后端目录不是 git 仓库，跳过"
     fi
@@ -286,9 +302,20 @@ pull_code() {
     if [ -d "${FRONTEND_DIR}/.git" ]; then
         cd "${FRONTEND_DIR}"
         log_info "拉取前端代码..."
-        git stash 2>/dev/null || true
-        git pull origin ${GIT_BRANCH} 2>&1
-        log_info "前端代码更新完成"
+
+        if git diff --quiet && git diff --cached --quiet; then
+            git pull origin ${GIT_BRANCH} 2>&1
+            log_info "前端代码更新完成"
+        else
+            log_warn "检测到前端本地修改，使用 autostash 保护..."
+            git pull --rebase --autostash origin ${GIT_BRANCH} 2>&1 || {
+                log_error "前端拉取冲突！请手动解决:"
+                log_error "  cd ${FRONTEND_DIR} && git stash pop && git diff"
+                log_warn "跳过前端代码拉取，使用本地版本继续部署"
+                git rebase --abort 2>/dev/null || true
+            }
+            log_info "前端代码更新完成（本地修改已保留）"
+        fi
     else
         log_warn "前端目录不是 git 仓库，跳过"
     fi
@@ -499,8 +526,22 @@ configure_nginx_initial() {
         apt-get install -y nginx -q
     fi
 
-    # 备份默认配置
-    [ -f /etc/nginx/sites-enabled/default ] && mv /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.bak 2>/dev/null || true
+    # 清理所有可能冲突的配置文件
+    # 移除 default 和任何其他包含本域名的配置
+    [ -f /etc/nginx/sites-enabled/default ] && rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    [ -f /etc/nginx/sites-enabled/default.bak ] && rm -f /etc/nginx/sites-enabled/default.bak 2>/dev/null || true
+
+    # 清理 sites-enabled 中除本项目外的任何包含 DOMAIN 的配置
+    if [ -n "$DOMAIN" ]; then
+        for conf in /etc/nginx/sites-enabled/*; do
+            [ -f "$conf" ] || continue
+            local conf_basename=$(basename "$conf")
+            if [ "$conf_basename" != "${PROJECT_NAME}" ] && grep -q "$DOMAIN" "$conf" 2>/dev/null; then
+                log_warn "移除冲突的 Nginx 配置: $conf"
+                rm -f "$conf"
+            fi
+        done
+    fi
 
     if [ -z "$DOMAIN" ]; then
         SERVER_NAME=$PUBLIC_IP
@@ -988,6 +1029,36 @@ show_deployment_info() {
 # ═══════════════════════════════════════════════════════════
 
 case "${1:-}" in
+    --local)
+        # ══════════ 本地部署（不拉取 git，保护本地修改）══════════
+        log_step "本地部署 ${PROJECT_NAME}（跳过 git pull）"
+        echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+
+        check_root
+        check_project
+
+        start_docker
+        start_postgresql
+        start_redis
+
+        check_env
+        # 注意：不调用 pull_code()，保护本地修改
+        log_info "⏭️  跳过 git pull，使用本地代码"
+        install_deps
+
+        create_systemd_service
+        configure_nginx_initial
+        configure_ssl
+        configure_firewall
+
+        stop_service
+        start_service
+
+        setup_monitoring
+        show_status
+        show_deployment_info
+        ;;
     --restart)
         start_docker
         start_postgresql
@@ -1036,6 +1107,7 @@ case "${1:-}" in
         echo ""
         echo "选项:"
         echo "  (无参数)           完整部署: 服务检查 + 拉代码 + 安装依赖 + Nginx/SSL + 启动"
+        echo "  --local            本地部署: 跳过 git pull，保护本地修改的文件（推荐日常使用）"
         echo "  --restart          重启后端 (先启动 Docker/PG/Redis)"
         echo "  --pull             仅拉代码"
         echo "  --stop             停止后端服务"
