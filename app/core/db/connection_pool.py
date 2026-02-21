@@ -168,7 +168,8 @@ class ConnectionPoolManager:
         for name, engine in self._engines.items():
             try:
                 async with engine.connect() as conn:
-                    await conn.execute("SELECT 1")
+                    from sqlalchemy import text
+                    await conn.execute(text("SELECT 1"))
                 health[f"db_{name}"] = True
             except Exception as e:
                 logger.error(f"Database pool '{name}' health check failed: {e}")

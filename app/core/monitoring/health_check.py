@@ -80,7 +80,8 @@ class HealthChecker:
         """检查数据库连接"""
         try:
             async with self.pool_manager.get_db_session() as session:
-                result = await session.execute("SELECT 1")
+                from sqlalchemy import text
+                result = await session.execute(text("SELECT 1"))
                 return result.scalar() == 1
         except:
             return False

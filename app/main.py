@@ -179,8 +179,9 @@ async def health_check():
     try:
         # 检查数据库连接
         from app.db.session import SessionLocal
+        from sqlalchemy import text
         db = SessionLocal()
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         db.close()
         db_status = "healthy"
     except Exception as e:
@@ -425,8 +426,9 @@ async def health_check():
     try:
         # 检查数据库连接
         from app.db.session import SessionLocal
+        from sqlalchemy import text
         db = SessionLocal()
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         db.close()
         db_status = "healthy"
     except Exception as e:
