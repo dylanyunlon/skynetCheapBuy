@@ -382,8 +382,8 @@ stop_service() {
         log_info "通过 systemd 停止 ${PROJECT_NAME}..."
         systemctl stop ${PROJECT_NAME}
         sleep 2
-        log_info "服务已停止"
-        return
+        log_info "Systemd 服务已停止"
+        # ★ 修复: 去掉 return，继续执行端口清理，防止 [Errno 98] address already in use
     fi
 
     # 方法 2: PID 文件
@@ -394,18 +394,28 @@ stop_service() {
             kill "$PID" 2>/dev/null || true
             sleep 2
             kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null || true
-            log_info "服务已停止"
+            log_info "进程已停止"
         fi
         rm -f "${PID_FILE}"
     fi
 
-    # 方法 3: 清理端口占用
+    # 方法 3: 清理端口占用 (兜底，无论方法 1/2 是否执行都会运行)
     PIDS=$(lsof -ti:${APP_PORT} 2>/dev/null || true)
     if [ -n "$PIDS" ]; then
-        log_warn "清理端口 ${APP_PORT} 的进程: ${PIDS}"
+        log_warn "清理端口 ${APP_PORT} 的残留进程: ${PIDS}"
         echo "$PIDS" | xargs kill -9 2>/dev/null || true
         sleep 1
     fi
+
+    # 最终验证端口已释放
+    PIDS_FINAL=$(lsof -ti:${APP_PORT} 2>/dev/null || true)
+    if [ -n "$PIDS_FINAL" ]; then
+        log_warn "端口 ${APP_PORT} 仍被占用: ${PIDS_FINAL}，使用 fuser 强制释放..."
+        fuser -k ${APP_PORT}/tcp 2>/dev/null || true
+        sleep 1
+    fi
+
+    log_info "✅ 服务停止完成，端口 ${APP_PORT} 已释放"
 }
 
 start_service() {
@@ -462,7 +472,102 @@ start_service() {
 }
 
 # ═══════════════════════════════════════════════════════════
-# 5. Systemd 服务创建
+# 5. Logging 配置 (JSON 格式，解决 KeyError: 'formatters')
+# ═══════════════════════════════════════════════════════════
+
+setup_logging_config() {
+    log_step "配置 Logging (JSON)"
+
+    mkdir -p "${PROJECT_DIR}/config"
+    mkdir -p "${LOG_DIR}"
+
+    # 删除可能导致冲突的旧格式 logging 配置文件
+    for f in logging.conf logging.ini logging.cfg; do
+        if [ -f "${PROJECT_DIR}/${f}" ]; then
+            log_warn "发现可能导致冲突的配置文件: ${f}，已备份"
+            mv "${PROJECT_DIR}/${f}" "${PROJECT_DIR}/${f}.bak.$(date +%s)"
+        fi
+    done
+
+    # ★ 修复: 写入 JSON 格式日志配置，uvicorn 能正确解析 'formatters' 键
+    cat > "${PROJECT_DIR}/config/logging_config.json" <<'LOGCFG'
+{
+    "version": 1,
+    "disable_existing_loggers": false,
+    "formatters": {
+        "default": {
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S"
+        },
+        "access": {
+            "()": "uvicorn.logging.AccessFormatter",
+            "fmt": "%(asctime)s - %(client_addr)s - \"%(request_line)s\" %(status_code)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S"
+        }
+    },
+    "handlers": {
+        "default": {
+            "class": "logging.StreamHandler",
+            "formatter": "default",
+            "stream": "ext://sys.stdout"
+        },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "default",
+            "filename": "logs/app.log",
+            "maxBytes": 10485760,
+            "backupCount": 5,
+            "encoding": "utf-8"
+        },
+        "error_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "default",
+            "filename": "logs/error.log",
+            "maxBytes": 10485760,
+            "backupCount": 5,
+            "encoding": "utf-8",
+            "level": "ERROR"
+        }
+    },
+    "loggers": {
+        "uvicorn": {
+            "handlers": ["default", "file"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "uvicorn.error": {
+            "handlers": ["default", "file", "error_file"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "uvicorn.access": {
+            "handlers": ["default", "file"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "app": {
+            "handlers": ["default", "file", "error_file"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "app.core.agents": {
+            "handlers": ["default", "file", "error_file"],
+            "level": "DEBUG",
+            "propagate": false
+        }
+    },
+    "root": {
+        "handlers": ["default", "file"],
+        "level": "INFO"
+    }
+}
+LOGCFG
+
+    log_info "✅ 日志配置已写入: ${PROJECT_DIR}/config/logging_config.json"
+}
+
+# ═══════════════════════════════════════════════════════════
+# 6. Systemd 服务创建
 # ═══════════════════════════════════════════════════════════
 
 create_systemd_service() {
@@ -492,9 +597,16 @@ WorkingDirectory=${PROJECT_DIR}
 Environment="PATH=${VENV_DIR}/bin:/usr/bin:/usr/local/bin"
 Environment="PYTHONPATH=${PROJECT_DIR}"
 Environment="PYTHONUNBUFFERED=1"
-ExecStart=${UVICORN_BIN} app.main:app --host 0.0.0.0 --port ${APP_PORT} --workers ${WORKERS} --log-level ${LOG_LEVEL}
+
+# ★ 修复: 启动前强制清理端口，防止 [Errno 98] address already in use
+ExecStartPre=/bin/bash -c 'fuser -k ${APP_PORT}/tcp 2>/dev/null || true; sleep 1'
+
+# ★ 修复: --log-config 使用 JSON 格式，解决 KeyError: 'formatters'
+ExecStart=${UVICORN_BIN} app.main:app --host 0.0.0.0 --port ${APP_PORT} --workers ${WORKERS} --log-level ${LOG_LEVEL} --log-config ${PROJECT_DIR}/config/logging_config.json
 Restart=always
 RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=60
 StandardOutput=append:/var/log/${PROJECT_NAME}/stdout.log
 StandardError=append:/var/log/${PROJECT_NAME}/stderr.log
 
@@ -1047,6 +1159,7 @@ case "${1:-}" in
         log_info "⏭️  跳过 git pull，使用本地代码"
         install_deps
 
+        setup_logging_config
         create_systemd_service
         configure_nginx_initial
         configure_ssl
@@ -1100,6 +1213,7 @@ case "${1:-}" in
         ;;
     --setup-systemd)
         check_root
+        setup_logging_config
         create_systemd_service
         ;;
     --help|-h)
@@ -1139,6 +1253,7 @@ case "${1:-}" in
         install_deps
 
         # 3. Systemd 服务
+        setup_logging_config
         create_systemd_service
 
         # 4. Nginx + SSL

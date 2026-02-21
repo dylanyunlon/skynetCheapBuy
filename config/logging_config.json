@@ -1,0 +1,70 @@
+{
+    "version": 1,
+    "disable_existing_loggers": false,
+    "formatters": {
+        "default": {
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S"
+        },
+        "access": {
+            "()": "uvicorn.logging.AccessFormatter",
+            "fmt": "%(asctime)s - %(client_addr)s - \"%(request_line)s\" %(status_code)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S"
+        }
+    },
+    "handlers": {
+        "default": {
+            "class": "logging.StreamHandler",
+            "formatter": "default",
+            "stream": "ext://sys.stdout"
+        },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "default",
+            "filename": "logs/app.log",
+            "maxBytes": 10485760,
+            "backupCount": 5,
+            "encoding": "utf-8"
+        },
+        "error_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "default",
+            "filename": "logs/error.log",
+            "maxBytes": 10485760,
+            "backupCount": 5,
+            "encoding": "utf-8",
+            "level": "ERROR"
+        }
+    },
+    "loggers": {
+        "uvicorn": {
+            "handlers": ["default", "file"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "uvicorn.error": {
+            "handlers": ["default", "file", "error_file"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "uvicorn.access": {
+            "handlers": ["default", "file"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "app": {
+            "handlers": ["default", "file", "error_file"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "app.core.agents": {
+            "handlers": ["default", "file", "error_file"],
+            "level": "DEBUG",
+            "propagate": false
+        }
+    },
+    "root": {
+        "handlers": ["default", "file"],
+        "level": "INFO"
+    }
+}

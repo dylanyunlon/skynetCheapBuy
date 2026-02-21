@@ -1,41 +1,30 @@
 #!/usr/bin/env python3
 """
-CheapBuy Agentic Loop v8 — Claude Code 全功能对标版 (v8 完整升级)
-===============================================================
-v8 新增 (对标 claudecode功能.txt Feature #10-#15):
+CheapBuy Agentic Loop v9 — Claude Code 全功能深度集成版
+=========================================================
+v9 新增 (深度集成 claudecode 全部功能):
 
-  ★ DebugAgent        — 自动调试循环 (run → diagnose → fix → verify)
-  ★ RevertManager     — 编辑历史追踪 + 安全回退
-  ★ DiffTracker       — 详细 +N/-M 变更追踪 (perf_takehome.py, +3, -4)
-  ★ TestRunner        — 结构化测试执行与结果解析
-  ★ CorrectnessCheck  — 输出正确性对比验证
-  ★ ChunkScheduler    — 工具调用交错调度优化
-  ★ PipelineOptimizer — 批量读取/命令合并
-  ★ ExecutionTracker  — Claude Code 风格 turn 摘要生成
+  ★ ChunkScheduler 实际接入   — 工具调用依赖分析 + 并行调度 (不再空挂)
+  ★ ExecutionTracker 实际接入  — 每个 turn 精确统计 + Claude Code 风格摘要
+  ★ DebugAgent 工具化          — 新增 debug_test 工具, AI 可直接调用调试循环
+  ★ DiffSummary 事件           — 每 turn 结束时发出累积变更摘要
+  ★ Approval Wait 机制         — 高风险命令阻塞等待用户批准
+  ★ task_complete 自动退出     — 检测到 task_complete 立即结束循环
+  ★ 增强 System Prompt         — 对标 Claude Code 工作流最佳实践
+
+v8 全部保留:
+  DebugAgent, RevertManager, DiffTracker, TestRunner, CorrectnessCheck,
+  ChunkScheduler, PipelineOptimizer, ExecutionTracker
 
 v7 全部保留:
-  ★ ToolRegistry        — 集中式工具注册, 分类, 权限, 统计
-  ★ ContextManager      — 精确 token 估算, 智能上下文压缩
-  ★ EventBuilder        — 标准化 SSE 事件流
-  ★ PermissionGate      — 命令风险评估 + 用户审批门
-  ★ Streaming Pipeline  — 实时工具结果流式推送
-  ★ Enhanced SubAgent   — 改进的子代理隔离和资源限制
-  ★ Session Metrics     — 全面的会话统计 (token, 成本, 时间, 工具)
-  ★ Heartbeat           — Keep-alive 心跳避免连接断开
-  ★ Context Compact SSE — 压缩事件通知前端
-  ★ Tool Duration Track — 每个工具调用计时
+  ToolRegistry, ContextManager, EventBuilder, PermissionGate,
+  Streaming Pipeline, SubAgent, Session Metrics, Heartbeat,
+  Context Compact SSE, Tool Duration Track
 
-  v6 全部保留: TodoWrite/Read, SubAgent, Memory, Glob, Reminder
-  v5 全部保留: view_truncated, batch_commands, run_script, revert_edit
-  v4 全部保留: 基础工具集, 并行执行, diff 统计
+v6 全部保留: TodoWrite/Read, SubAgent, Memory, Glob, Reminder
+v5 全部保留: view_truncated, batch_commands, run_script, revert_edit
 
-部署方式:
-  1. 备份当前 app/core/agents/agentic_loop.py
-  2. 新增模块到 app/core/agents/:
-     - debug_agent.py     (DebugAgent, RevertManager, DiffTracker, TestRunner)
-     - loop_scheduler.py  (ChunkScheduler, PipelineOptimizer, ExecutionTracker)
-  3. 更新 __init__.py 导出
-  4. 替换 agentic_loop.py 为本文件
+位置: app/core/agents/agentic_loop.py
 """
 
 import os
@@ -59,7 +48,6 @@ from .event_stream import EventBuilder, EventType, format_sse
 from .permission_gate import PermissionGate, RiskLevel
 from .debug_agent import DebugAgent, RevertManager, DiffTracker, TestRunner
 from .loop_scheduler import ChunkScheduler, PipelineOptimizer, ExecutionTracker, ScheduledCall
-
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -429,24 +417,57 @@ TOOL_DEFINITIONS = [
             "required": ["content"]
         }
     },
+    # === v9 工具: 调试 + 回退 ===
+    {
+        "name": "debug_test",
+        "description": (
+            "Run a test command and automatically debug failures. "
+            "Executes the command, captures structured test results, and if it fails, "
+            "produces a diagnosis with likely failing files and suggested fixes. "
+            "UI displays as 'Test: <command>' with pass/fail status."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Test command to run (e.g., 'python -m pytest tests/')"},
+                "max_retries": {"type": "integer", "description": "Max auto-debug iterations (default: 3)"},
+                "reference_output": {"type": "string", "description": "Expected output for correctness check"},
+                "description": {"type": "string", "description": "What test you're running"}
+            },
+            "required": ["command"]
+        }
+    },
+    {
+        "name": "revert_to_checkpoint",
+        "description": (
+            "Revert a specific file to a previous version from the edit history. "
+            "Use edit_id from the edit history or omit to revert the last edit to a file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to revert"},
+                "edit_id": {"type": "string", "description": "Specific edit ID to revert (optional, defaults to last edit)"},
+                "description": {"type": "string", "description": "Why you're reverting"}
+            },
+            "required": ["path"]
+        }
+    },
 ]
-
-
-# =============================================================================
-# System Prompt (v7)
 # =============================================================================
 
 AGENTIC_SYSTEM_PROMPT = """You are an expert software engineer working in a Linux environment.
 You have tools to read/write/edit files, run bash commands, search code, browse the web,
-plan tasks with todo_write, and delegate complex work to sub-agents via task.
+plan tasks with todo_write, delegate work to sub-agents, and debug with debug_test.
 
 ## Core Workflow (Claude Code Style)
 1. **Plan first**: Use todo_write to create a structured task list for any non-trivial task.
-2. **Explore**: Use read_file, grep_search, glob to understand the codebase.
+2. **Explore**: Use read_file, batch_read, grep_search, glob to understand the codebase.
 3. **Implement**: Use edit_file, write_file, multi_edit to make changes.
-4. **Verify**: Run tests/builds with bash. Check results.
-5. **Track progress**: Update todo_write as you complete each step.
-6. **Record knowledge**: Use memory_write to save important project info.
+4. **Verify**: Use debug_test or bash to run tests. Check results.
+5. **Debug**: If tests fail, read error -> read file -> fix -> re-test. Use revert_to_checkpoint if a fix causes regression.
+6. **Track progress**: Update todo_write as you complete each step.
+7. **Record knowledge**: Use memory_write to save important project info.
 
 ## Tool Usage Guidelines
 
@@ -464,14 +485,19 @@ plan tasks with todo_write, and delegate complex work to sub-agents via task.
 
 4. **File operations**:
    - write_file for new files, edit_file for precise changes
-   - multi_edit for multiple changes, batch_read for multiple files
+   - multi_edit for multiple changes to one file, batch_read for multiple files
    - glob for fast file pattern matching
+   - ALWAYS use absolute file paths
 
-5. **Debugging**: Read error -> Read file -> Fix -> Verify. Use batch_commands for diagnostics.
+5. **Debugging** (Claude Code pattern):
+   - Use debug_test for structured test execution with auto-diagnosis
+   - Read error -> Read file -> Fix -> Verify cycle
+   - Use batch_commands for multi-step diagnostics
+   - Use revert_to_checkpoint if a fix causes new failures
 
 6. **Completion**: Call task_complete with a clear summary when done.
 
-7. **Be concise**: Focus on actions. Use absolute file paths. No emojis."""
+7. **Be concise**: Focus on actions. No emojis. Use absolute paths."""
 
 
 # =============================================================================
@@ -561,6 +587,9 @@ class ToolExecutor:
             "task": self._task_stub,
             "memory_read": self._memory_read,
             "memory_write": self._memory_write,
+            # v9: New tool handlers
+            "debug_test": self._debug_test,
+            "revert_to_checkpoint": self._revert_to_checkpoint,
         }
         handler = handlers.get(tool_name)
         if not handler:
@@ -1104,6 +1133,84 @@ class ToolExecutor:
         except Exception as e:
             return json.dumps({"error": f"Memory write failed: {str(e)}"})
 
+    # === v9: New tool implementations ===
+
+    async def _debug_test(self, params: Dict) -> str:
+        """Run test with structured result and auto-diagnosis"""
+        command = params.get("command", "")
+        max_retries = min(params.get("max_retries", 3), 10)
+        reference = params.get("reference_output")
+        desc = params.get("description", f"Test: {command[:60]}")
+        if not command:
+            return json.dumps({"error": "No test command provided"})
+        try:
+            from .debug_agent import DebugAgent, TestRunner
+            runner = TestRunner(self.work_dir)
+            result = await runner.run(command)
+            # Check correctness if reference provided
+            if reference and result.passed:
+                from .debug_agent import CorrectnessChecker
+                check = CorrectnessChecker.compare_output(result.stdout, reference)
+                if not check["matches"]:
+                    result.passed = False
+                    result.failure_details.append({
+                        "test": "correctness_check",
+                        "reason": f"Output mismatch: {check.get('diff', '')[:300]}"
+                    })
+            rd = result.to_dict()
+            rd["description"] = desc
+            rd["display_title"] = f"Test: {desc}"
+            # If test failed, add diagnosis
+            if not result.passed:
+                agent = DebugAgent(self.work_dir, self.revert_manager)
+                diagnosis = await agent.diagnose(result)
+                rd["diagnosis"] = diagnosis
+            return json.dumps(rd, ensure_ascii=False)
+        except Exception as e:
+            # Fallback to plain bash execution
+            r_str = await self._bash({"command": command, "timeout": 300})
+            try:
+                r = json.loads(r_str)
+                r["description"] = desc
+                r["display_title"] = f"Test: {desc}"
+                r["passed"] = r.get("exit_code", -1) == 0
+                return json.dumps(r, ensure_ascii=False)
+            except Exception:
+                return json.dumps({"error": str(e), "command": command})
+
+    async def _revert_to_checkpoint(self, params: Dict) -> str:
+        """Revert file to a previous version using RevertManager"""
+        path = self._resolve(params["path"])
+        edit_id = params.get("edit_id")
+        desc = params.get("description", "Revert to checkpoint")
+        try:
+            if edit_id:
+                record = self.revert_manager.revert_by_id(edit_id)
+            else:
+                record = self.revert_manager.revert_last(path)
+            if record:
+                fn = os.path.basename(path)
+                self.file_changes.append({
+                    "action": "reverted", "path": path, "filename": fn,
+                    "added": record.removed_lines, "removed": record.added_lines,
+                })
+                return json.dumps({
+                    "success": True, "path": path, "filename": fn,
+                    "edit_id": record.edit_id,
+                    "description": record.description,
+                    "diff_display": record.diff_display,
+                    "display_title": f"Reverted: {desc}",
+                    "reverted": True,
+                }, ensure_ascii=False)
+            else:
+                return json.dumps({
+                    "error": f"No edit history found for {path}",
+                    "path": path,
+                    "edit_history": self.revert_manager.get_history(path=path, limit=5),
+                })
+        except Exception as e:
+            return json.dumps({"error": f"Revert failed: {str(e)}"})
+
     # === Utility methods ===
 
     def _resolve(self, path: str) -> str:
@@ -1175,7 +1282,8 @@ def build_turn_summary(tool_uses: List[Dict]) -> Dict[str, Any]:
         "task_complete": "check-circle", "view_truncated": "eye",
         "batch_commands": "terminal", "run_script": "code", "revert_edit": "rotate-ccw",
         "todo_write": "list-todo", "todo_read": "list-checks",
-        "task": "git-branch", "memory_read": "brain", "memory_write": "brain"
+        "task": "git-branch", "memory_read": "brain", "memory_write": "brain",
+        "debug_test": "bug", "revert_to_checkpoint": "rotate-ccw",
     }
 
     for tu in tool_uses:
@@ -1195,10 +1303,13 @@ def build_turn_summary(tool_uses: List[Dict]) -> Dict[str, Any]:
     sc = sum(counts.get(n, 0) for n in ("list_dir", "grep_search", "file_search", "glob"))
     cc = sum(counts.get(n, 0) for n in ("bash", "batch_commands", "run_script"))
     tc = sum(counts.get(n, 0) for n in ("todo_write", "todo_read"))
+    dc = counts.get("debug_test", 0)  # v9
 
     parts = []
     if cc:
         parts.append(f"Ran {cc} command{'s' if cc > 1 else ''}")
+    if dc:
+        parts.append(f"ran {dc} test{'s' if dc > 1 else ''}")
     if vc:
         parts.append(f"viewed {vc} file{'s' if vc > 1 else ''}")
     if counts.get("write_file"):
@@ -1290,6 +1401,10 @@ def _auto_title(name, inp):
         return "Read project memory"
     elif name == "memory_write":
         return f"Update memory: {inp.get('section', 'notes')}"
+    elif name == "debug_test":
+        return f"Test: {inp.get('description', inp.get('command', '')[:60])}"
+    elif name == "revert_to_checkpoint":
+        return f"Revert: {inp.get('description', inp.get('path', 'file'))}"
     return name
 
 
@@ -1371,31 +1486,21 @@ async def run_subagent(ai_engine, work_dir, prompt, subagent_type="general",
 
 class AgenticLoop:
     """
-    Agentic Loop v8 — Claude Code 全功能对标 (v8 完整升级)
+    Agentic Loop v9 — Claude Code 全功能深度集成版
 
-    v8 新增:
-      - DebugAgent 集成 (自动调试循环, Feature #10-#14)
-      - RevertManager 集成 (编辑历史 + 安全回退)
-      - DiffTracker 集成 (详细 +N/-M 变更追踪, Feature #8-9)
-      - ChunkScheduler 集成 (工具调用交错调度, Feature #15)
-      - ExecutionTracker 集成 (Claude Code 风格 turn 摘要)
-      - TestRunner 集成 (结构化测试执行, Feature #10)
+    v9 改进:
+      - ChunkScheduler 实际接入: 工具调用依赖分析 + 并行调度
+      - ExecutionTracker 实际接入: 精确 turn 统计 + Claude Code 风格摘要
+      - DebugAgent 工具化: debug_test 工具直接暴露给 AI
+      - DiffSummary 事件: 每 turn 发出累积变更摘要
+      - task_complete 自动退出: 检测到即刻结束
+      - 增强 System Prompt: 对标 Claude Code
 
-    v7 全部保留:
-      - ToolRegistry 集成 (工具统计, 分类查询)
-      - ContextManager 集成 (精确 token, 智能压缩)
-      - EventBuilder 集成 (标准化事件流)
-      - PermissionGate 集成 (命令风险评估)
-      - 工具执行计时 (duration_ms per tool)
-      - Context compaction SSE 事件
-      - 心跳支持避免长连接断开
-      - 会话 metrics 全面统计
-
-    事件类型 (v8 完整):
+    事件类型 (v9 完整):
       start, text, thinking, tool_start, tool_result, file_change,
       turn, progress, usage, todo_update, subagent_start, subagent_result,
-      context_compact, approval_needed, done, error, heartbeat,
-      debug_start, debug_result, test_result, revert, diff_summary
+      context_compact, approval_needed, approval_wait, done, error, heartbeat,
+      debug_start, debug_result, test_result, revert, diff_summary, chunk_schedule
     """
     DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
@@ -1573,58 +1678,117 @@ class AgenticLoop:
                     input_tokens=self.total_input_tokens,
                     output_tokens=self.total_output_tokens,
                     cost=self.total_cost,
-                    todo_status=self.executor.todo_manager.read()
+                    todo_status=self.executor.todo_manager.read(),
+                    diff_summary=self.diff_tracker.get_summary(),
                 )
                 return
 
-            # === Execute tools ===
+            # === v9: Execute tools with ChunkScheduler + ExecutionTracker ===
             fc_before = len(self.executor.file_changes)
             tool_results = []
+            task_completed = False  # v9: detect task_complete
+
+            # v9: Reset per-turn execution tracker
+            self.execution_tracker.reset()
 
             subagent_calls = [tu for tu in tool_uses if tu["name"] == "task"]
             normal_calls = [tu for tu in tool_uses if tu["name"] != "task"]
 
-            # Normal tools (parallel if enabled)
+            # v9: Use ChunkScheduler for dependency-aware execution
             if self.enable_parallel and len(normal_calls) > 1:
-                calls = [(tu["name"], tu["input"], tu["id"]) for tu in normal_calls]
-                par_results = await self.executor.execute_parallel(calls)
-                result_map = {tid: (rs, tn) for tid, rs, tn in par_results}
-                for tu in normal_calls:
-                    tid = tu["id"]
-                    tn = tu["name"]
-                    self.total_tool_calls += 1
-                    rs, _ = result_map.get(tid, ("", tn))
-                    if len(rs) > MAX_TOOL_OUTPUT_LEN:
-                        rs = rs[:MAX_TOOL_OUTPUT_LEN] + "\n...[truncated]"
-                    meta = self._extract_meta(tn, rs)
-                    yield self.event_builder.tool_result(
-                        tool=tn, tool_use_id=tid, result=rs[:MAX_DISPLAY_RESULT],
-                        result_meta=meta, success="error" not in rs.lower()[:50], turn=turn
+                scheduled = [
+                    ScheduledCall(
+                        tool_name=tu["name"],
+                        tool_input=tu["input"],
+                        tool_use_id=tu["id"],
+                    ) for tu in normal_calls
+                ]
+                chunks = self.chunk_scheduler.schedule(scheduled)
+                parallel_count = sum(len(ch) for ch in chunks if len(ch) > 1)
+
+                # v9: Emit scheduling info
+                if len(chunks) > 1 or parallel_count > 0:
+                    yield self.event_builder.chunk_schedule(
+                        total_calls=len(normal_calls),
+                        chunks=len(chunks),
+                        parallel_calls=parallel_count,
+                        turn=turn,
                     )
-                    tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": rs})
-                    if tn in ("todo_write", "todo_read"):
-                        yield self.event_builder.todo_update(turn, self.executor.todo_manager.read())
+
+                # Execute chunk by chunk
+                for chunk in chunks:
+                    if len(chunk) > 1 and PipelineOptimizer.can_parallelize(chunk):
+                        # Parallel execution within chunk
+                        calls = [(sc.tool_name, sc.tool_input, sc.tool_use_id) for sc in chunk]
+                        par_results = await self.executor.execute_parallel(calls)
+                        result_map = {tid: (rs, tn) for tid, rs, tn in par_results}
+                        for sc in chunk:
+                            self.total_tool_calls += 1
+                            rs, _ = result_map.get(sc.tool_use_id, ("", sc.tool_name))
+                            if len(rs) > MAX_TOOL_OUTPUT_LEN:
+                                rs = rs[:MAX_TOOL_OUTPUT_LEN] + "\n...[truncated]"
+                            meta = self._extract_meta(sc.tool_name, rs)
+                            success = "error" not in rs.lower()[:50]
+                            self.execution_tracker.record(
+                                sc.tool_name, sc.tool_input, 0, success, meta
+                            )
+                            yield self.event_builder.tool_result(
+                                tool=sc.tool_name, tool_use_id=sc.tool_use_id,
+                                result=rs[:MAX_DISPLAY_RESULT], result_meta=meta,
+                                success=success, turn=turn
+                            )
+                            tool_results.append({"type": "tool_result", "tool_use_id": sc.tool_use_id, "content": rs})
+                            if sc.tool_name in ("todo_write", "todo_read"):
+                                yield self.event_builder.todo_update(turn, self.executor.todo_manager.read())
+                            if sc.tool_name == "task_complete":
+                                task_completed = True
+                    else:
+                        # Sequential execution
+                        for sc in chunk:
+                            self.total_tool_calls += 1
+                            tool_start_ms = time.time() * 1000
+                            rs = await self.executor.execute(sc.tool_name, sc.tool_input)
+                            tool_duration_ms = time.time() * 1000 - tool_start_ms
+                            if len(rs) > MAX_TOOL_OUTPUT_LEN:
+                                rs = rs[:MAX_TOOL_OUTPUT_LEN] + "\n...[truncated]"
+                            meta = self._extract_meta(sc.tool_name, rs)
+                            success = "error" not in rs.lower()[:50]
+                            self.execution_tracker.record(
+                                sc.tool_name, sc.tool_input, tool_duration_ms, success, meta
+                            )
+                            yield self.event_builder.tool_result(
+                                tool=sc.tool_name, tool_use_id=sc.tool_use_id,
+                                result=rs[:MAX_DISPLAY_RESULT], result_meta=meta,
+                                success=success, turn=turn, duration_ms=tool_duration_ms
+                            )
+                            tool_results.append({"type": "tool_result", "tool_use_id": sc.tool_use_id, "content": rs})
+                            if sc.tool_name in ("todo_write", "todo_read"):
+                                yield self.event_builder.todo_update(turn, self.executor.todo_manager.read())
+                            if sc.tool_name == "task_complete":
+                                task_completed = True
             else:
+                # Single call or parallel disabled — sequential execution
                 for tu in normal_calls:
                     tn, ti, tid = tu["name"], tu["input"], tu["id"]
                     self.total_tool_calls += 1
-
-                    # v7: Timed tool execution
                     tool_start_ms = time.time() * 1000
                     rs = await self.executor.execute(tn, ti)
                     tool_duration_ms = time.time() * 1000 - tool_start_ms
-
                     if len(rs) > MAX_TOOL_OUTPUT_LEN:
                         rs = rs[:MAX_TOOL_OUTPUT_LEN] + "\n...[truncated]"
                     meta = self._extract_meta(tn, rs)
+                    success = "error" not in rs.lower()[:50]
+                    self.execution_tracker.record(tn, ti, tool_duration_ms, success, meta)
                     yield self.event_builder.tool_result(
                         tool=tn, tool_use_id=tid, result=rs[:MAX_DISPLAY_RESULT],
-                        result_meta=meta, success="error" not in rs.lower()[:50],
+                        result_meta=meta, success=success,
                         turn=turn, duration_ms=tool_duration_ms
                     )
                     tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": rs})
                     if tn in ("todo_write", "todo_read"):
                         yield self.event_builder.todo_update(turn, self.executor.todo_manager.read())
+                    if tn == "task_complete":
+                        task_completed = True
 
             # SubAgent calls
             for tu in subagent_calls:
@@ -1677,18 +1841,49 @@ class AgenticLoop:
                     added=ch.get("added", 0), removed=ch.get("removed", 0), turn=turn
                 )
 
+            # v9: Emit diff_summary if there were file changes this turn
+            new_changes = self.executor.file_changes[fc_before:]
+            if new_changes:
+                ds = self.diff_tracker.get_summary()
+                yield self.event_builder.diff_summary(
+                    files_changed=ds.get("files_changed", len(new_changes)),
+                    total_added=ds.get("total_added", 0),
+                    total_removed=ds.get("total_removed", 0),
+                    file_details=ds.get("file_details", []),
+                    turn=turn,
+                )
+
             messages.append({"role": "user", "content": tool_results})
 
-            # Turn summary
+            # v9: Turn summary using ExecutionTracker for accurate display
+            et_display = self.execution_tracker.build_turn_display()
+            et_details = self.execution_tracker.build_detail_items()
             summary = build_turn_summary(tool_uses)
+            # Override display with ExecutionTracker's more accurate one
+            display = et_display if et_display != "Processing" else summary["display"]
             yield self.event_builder.turn_summary(
                 turn=turn, tool_calls_count=len(tool_uses),
                 total_tool_calls=self.total_tool_calls,
-                summary=summary, display=summary["display"],
-                detail_items=summary["detail_items"]
+                summary=summary, display=display,
+                detail_items=et_details if et_details else summary["detail_items"]
             )
 
-            # v7: Heartbeat check
+            # v9: task_complete auto-exit
+            if task_completed:
+                dur = (datetime.now() - start_time).total_seconds()
+                yield self.event_builder.done(
+                    turns=turn, total_tool_calls=self.total_tool_calls,
+                    duration=dur, stop_reason="task_complete", work_dir=self.work_dir,
+                    file_changes=self.executor.file_changes,
+                    input_tokens=self.total_input_tokens,
+                    output_tokens=self.total_output_tokens,
+                    cost=self.total_cost,
+                    todo_status=self.executor.todo_manager.read(),
+                    diff_summary=self.diff_tracker.get_summary(),
+                )
+                return
+
+            # Heartbeat check
             now = time.time()
             if now - last_heartbeat > HEARTBEAT_INTERVAL:
                 yield self.event_builder.heartbeat((datetime.now() - start_time).total_seconds())
@@ -1817,6 +2012,27 @@ class AgenticLoop:
             elif tool_name == "memory_write":
                 meta["success"] = d.get("success", False)
                 meta["mode"] = d.get("mode", "append")
+            # v9 tool meta
+            elif tool_name == "debug_test":
+                meta["passed"] = d.get("passed", False)
+                meta["exit_code"] = d.get("exit_code", -1)
+                meta["total_tests"] = d.get("total_tests", 0)
+                meta["passed_tests"] = d.get("passed_tests", 0)
+                meta["failed_tests"] = d.get("failed_tests", 0)
+                meta["duration_s"] = d.get("duration_s", 0)
+                meta["description"] = d.get("description", "")
+                meta["display_type"] = "test"
+                if d.get("diagnosis"):
+                    meta["diagnosis"] = {
+                        "error_type": d["diagnosis"].get("error_type", ""),
+                        "error_summary": d["diagnosis"].get("error_summary", "")[:200],
+                        "likely_files": d["diagnosis"].get("likely_files", [])[:5],
+                    }
+            elif tool_name == "revert_to_checkpoint":
+                meta["reverted"] = d.get("reverted", False)
+                meta["path"] = d.get("path", "")
+                meta["edit_id"] = d.get("edit_id", "")
+                meta["diff_display"] = d.get("diff_display", "")
         except Exception:
             pass
         return meta

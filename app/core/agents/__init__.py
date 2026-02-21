@@ -1,15 +1,13 @@
 """
-Skynet Agentic Loop v8 — Claude Code 全功能对标 (v8 完整升级)
-==============================================================
-v8 新增:
-  - DebugAgent: 自动调试循环 (Feature #10-#14)
-  - RevertManager: 文件编辑历史 + 安全回退
-  - TestRunner: 结构化测试执行
-  - CorrectnessChecker: 输出正确性验证
-  - DiffTracker: 详细 +N/-M 变更追踪
-  - ChunkScheduler: 工具调用交错调度 (Feature #15)
-  - PipelineOptimizer: 批量读取/命令优化
-  - ExecutionTracker: Claude Code 风格的 turn 摘要生成
+Skynet Agentic Loop v9 — Claude Code 全功能深度集成版
+======================================================
+v9 新增:
+  - ChunkScheduler 实际接入: 工具调用依赖分析 + 并行调度
+  - ExecutionTracker 实际接入: 精确 turn 统计
+  - DebugAgent 工具化: debug_test / revert_to_checkpoint 工具
+  - DiffSummary 事件: 每 turn 发出累积变更摘要
+  - task_complete 自动退出
+  - 增强 System Prompt
 
 模块导出
 """
@@ -93,7 +91,7 @@ __all__ = [
     # Permission gate
     "PermissionGate",
     "RiskLevel",
-    # v8: Debug agent
+    # Debug agent
     "DebugAgent",
     "RevertManager",
     "TestRunner",
@@ -101,7 +99,7 @@ __all__ = [
     "CorrectnessChecker",
     "DiffTracker",
     "EditRecord",
-    # v8: Loop scheduler
+    # Loop scheduler
     "ChunkScheduler",
     "PipelineOptimizer",
     "ExecutionTracker",
