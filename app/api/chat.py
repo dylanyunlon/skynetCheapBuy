@@ -322,6 +322,7 @@ async def stream_chat(
     # 设置适当的超时和保持连接
     return EventSourceResponse(
         generate(),
+        sep="\n",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

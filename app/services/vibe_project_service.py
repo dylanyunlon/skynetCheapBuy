@@ -135,7 +135,7 @@ class VibeProjectService:
             
             response = await self.ai_engine.get_completion(
                 messages=messages,
-                model="claude-opus-4-5-20251101",
+                model="claude-opus-4-6",
                 temperature=0.7,
                 max_tokens=3000
             )
@@ -217,7 +217,7 @@ class VibeProjectService:
             
             response = await self.ai_engine.get_completion(
                 messages=messages,
-                model="claude-opus-4-5-20251101",
+                model="claude-opus-4-6",
                 temperature=0.3,
                 max_tokens=3000
             )
@@ -294,7 +294,7 @@ class VibeProjectService:
             
             response = await self.ai_engine.get_completion(
                 messages=messages,
-                model="claude-opus-4-5-20251101",
+                model="claude-opus-4-6",
                 temperature=0.2,  # 降低温度确保脚本质量
                 max_tokens=4000
             )

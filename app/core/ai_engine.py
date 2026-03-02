@@ -636,8 +636,8 @@ class AIEngine:
     """AI引擎主类"""
     
     # 默认模型配置
-    DEFAULT_MODEL = "claude-opus-4-5-20251101"
-    BENCHMARK_MODEL = "claude-opus-4-5-20251101"  # 用于benchmark的默认模型
+    DEFAULT_MODEL = "claude-opus-4-6"
+    BENCHMARK_MODEL = "claude-opus-4-6"  # 用于benchmark的默认模型
     
     def __init__(self, default_model: Optional[str] = None):
         self.providers: Dict[str, AIProvider] = {}

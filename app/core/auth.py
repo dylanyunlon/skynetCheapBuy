@@ -1,30 +1,43 @@
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 import uuid
+import bcrypt
 
 from app.config import settings
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.auth import TokenData
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
+
+
+def _safe_encode(password: str) -> bytes:
+    """将密码编码为 bytes 并截断到 72 字节（bcrypt 硬限制）"""
+    return password.encode("utf-8")[:72]
+
 
 class AuthService:
     @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
-        """验证密码"""
-        return pwd_context.verify(plain_password, hashed_password)
+        """验证密码 — 直接使用 bcrypt，绕过 passlib 兼容性问题"""
+        try:
+            return bcrypt.checkpw(
+                _safe_encode(plain_password),
+                hashed_password.encode("utf-8") if isinstance(hashed_password, str) else hashed_password,
+            )
+        except Exception:
+            return False
     
     @staticmethod
     def get_password_hash(password: str) -> str:
         """生成密码哈希"""
-        return pwd_context.hash(password)
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(_safe_encode(password), salt)
+        return hashed.decode("utf-8")
     
     @staticmethod
     def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:

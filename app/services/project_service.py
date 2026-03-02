@@ -153,7 +153,7 @@ class ProjectService:
             messages = [{"role": "user", "content": modify_prompt}]
             response = await self.ai_engine.get_completion(
                 messages=messages,
-                model="claude-opus-4-5-20251101",
+                model="claude-opus-4-6",
                 temperature=0.7,
                 max_tokens=2000
             )

@@ -247,7 +247,7 @@ async def process_meta_stage_simplified(user_input: str, ai_engine: AIEngine) ->
         response = await asyncio.wait_for(
             ai_engine.get_completion(
                 messages=messages,
-                model="claude-opus-4-5-20251101",
+                model="claude-opus-4-6",
                 temperature=0.7,
                 max_tokens=2000
             ),
@@ -446,7 +446,7 @@ CRITICAL: 确保所有文件内容完整，没有占位符。
         response = await asyncio.wait_for(
             ai_engine.get_completion(
                 messages=messages,
-                model="claude-opus-4-5-20251101",
+                model="claude-opus-4-6",
                 temperature=0.2,
                 max_tokens=4000
             ),

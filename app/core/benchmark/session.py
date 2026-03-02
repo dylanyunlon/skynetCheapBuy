@@ -478,7 +478,7 @@ class BenchmarkSessionManager:
         try:
             response = await self.ai_engine.get_completion(
                 messages=[{"role": "user", "content": prompt}],
-                model="claude-opus-4-5-20251101",
+                model="claude-opus-4-6",
                 max_tokens=2000
             )
             analysis = response.get("content", "")
@@ -575,7 +575,7 @@ class BenchmarkSessionManager:
         try:
             response = await self.ai_engine.get_completion(
                 messages=[{"role": "user", "content": prompt}],
-                model="claude-opus-4-5-20251101",
+                model="claude-opus-4-6",
                 max_tokens=4000,
                 temperature=0.3
             )

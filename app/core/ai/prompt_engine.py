@@ -205,7 +205,7 @@ class PromptEngine:
             if hasattr(self.ai_service, 'get_completion'):
                 response = await self.ai_service.get_completion(
                     messages=[{"role": "user", "content": prompt}],
-                    model="claude-opus-4-5-20251101",
+                    model="claude-opus-4-6",
                     temperature=0.7 if call_type == "meta_optimization" else 0.3,
                     max_tokens=4000
                 )
@@ -219,7 +219,7 @@ class PromptEngine:
                 response = await self.ai_service.process_message(
                     user_id="system",
                     message=prompt,
-                    model="claude-opus-4-5-20251101"
+                    model="claude-opus-4-6"
                 )
                 return {
                     "success": True,

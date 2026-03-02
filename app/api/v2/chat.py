@@ -750,6 +750,7 @@ async def unified_chat_stream(
     
     return EventSourceResponse(
         generate(),
+        sep="\n",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

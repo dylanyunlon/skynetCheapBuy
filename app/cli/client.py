@@ -34,7 +34,7 @@ class ClaudeCodeClient:
     async def create_project(
         self,
         request: str,
-        model: str = "claude-opus-4-5-20251101",
+        model: str = "claude-opus-4-6",
         auto_execute: bool = True,
         max_debug_attempts: int = 3
     ) -> Dict[str, Any]:

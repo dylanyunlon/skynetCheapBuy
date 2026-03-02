@@ -321,7 +321,7 @@ class BenchmarkCodeExtractor:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                model="claude-opus-4-5-20251101",
+                model="claude-opus-4-6",
                 temperature=0.1,
                 max_tokens=2000
             )

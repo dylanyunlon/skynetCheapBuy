@@ -122,6 +122,7 @@ async def stream_chat_v2(
     
     return EventSourceResponse(
         generate(),
+        sep="\n",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

@@ -1585,11 +1585,28 @@ class AgenticLoop:
                 elapsed=(datetime.now() - start_time).total_seconds()
             )
 
-            # === v7: Context compaction with events ===
+            # === v10: Progressive micro-compaction (runs every 5 turns) ===
+            if self.context_manager.needs_micro_compaction(messages, turn):
+                before_tokens = estimate_messages_tokens(messages)
+                before_count = len(messages)
+                messages = await self.context_manager.micro_compact(messages, turn)
+                after_tokens = estimate_messages_tokens(messages)
+                logger.info(
+                    f"[v10] Micro-compact turn {turn}: "
+                    f"{before_tokens}→{after_tokens} tokens "
+                    f"({before_count}→{len(messages)} msgs)"
+                )
+                yield self.event_builder.context_compact(
+                    before_tokens=before_tokens, after_tokens=after_tokens,
+                    before_messages=before_count, after_messages=len(messages),
+                    turn=turn
+                )
+
+            # === v7: Full context compaction (safety net at 92%) ===
             if self.context_manager.needs_compaction(messages):
                 before_tokens = estimate_messages_tokens(messages)
                 before_count = len(messages)
-                logger.info(f"[v7] Context at {before_tokens} tokens, compacting...")
+                logger.info(f"[v7] Context at {before_tokens} tokens, full compacting...")
                 messages = await self.context_manager.compact(
                     messages, ai_engine=self.ai_engine, model=self.model
                 )

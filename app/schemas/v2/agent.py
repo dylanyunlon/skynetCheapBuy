@@ -5,7 +5,7 @@ from datetime import datetime
 class ProjectCreateRequest(BaseModel):
     """项目创建请求"""
     prompt: str = Field(..., description="项目需求描述")
-    model: str = Field(default="claude-opus-4-5-20251101", description="AI模型")
+    model: str = Field(default="claude-opus-4-6", description="AI模型")
     auto_execute: bool = Field(default=True, description="是否自动执行")
     max_debug_attempts: int = Field(default=3, ge=0, le=5, description="最大调试次数")
     project_type: Optional[str] = Field(default=None, description="项目类型")

@@ -214,6 +214,7 @@ async def agentic_task(
     
     return EventSourceResponse(
         event_generator(),
+        sep="\n",           # 使用 \n 而非 \r\n，确保前端 split('\n\n') 能正确解析
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

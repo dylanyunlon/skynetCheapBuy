@@ -1,12 +1,17 @@
 """
-Context Manager — Context Window Management for Agentic Loop v7
+Context Manager v10 — Sliding Window + Progressive Compaction
 ================================================================
-Implements Claude Code's context window strategy:
-  - Accurate token estimation (tiktoken-compatible fallback)
-  - Auto-compaction at 92% context usage (Claude Code wU2 threshold)
-  - Smart summarization preserving critical context
-  - Message priority ranking for what to keep vs summarize
-  - Real-time context usage tracking for frontend display
+Knuth-inspired rewrite addressing 0228demo's O(n²) cost problem:
+
+  KEY CHANGE: Don't wait until 92% to compact. Instead:
+    - Micro-compact every 5 turns (compress old turns into summaries)
+    - Maintain a sliding window of 4 recent turns at full fidelity
+    - Keep total context budget ~40K tokens instead of letting it grow to 165K
+
+  0228 DEMO BEFORE: 30 turns, 3K→70K tokens, $3.18 total
+  PROJECTED AFTER:  30 turns, 3K→35K tokens, ~$0.80 total
+
+Original kept for backwards compatibility — all public APIs preserved.
 
 Drop-in at: app/core/agents/context_manager.py
 """
@@ -19,29 +24,38 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-# Context window limits
+# =============================================================================
+# Constants
+# =============================================================================
+
 MAX_CONTEXT_TOKENS = 180_000        # Claude 200k window, keep 20k buffer
-COMPACT_THRESHOLD_PCT = 0.92        # Matches Claude Code wU2 compactor
+COMPACT_THRESHOLD_PCT = 0.92        # Legacy threshold (kept for safety net)
 COMPACT_THRESHOLD = int(MAX_CONTEXT_TOKENS * COMPACT_THRESHOLD_PCT)
-TARGET_AFTER_COMPACT = int(MAX_CONTEXT_TOKENS * 0.60)  # Compact down to ~60%
+TARGET_AFTER_COMPACT = int(MAX_CONTEXT_TOKENS * 0.60)
+
+# v10: Sliding window parameters
+SLIDING_WINDOW_SIZE = 4             # Keep last N turns at full fidelity
+MICRO_COMPACT_INTERVAL = 5          # Run micro-compaction every N turns
+MICRO_COMPACT_BUDGET = 40_000       # Target max context tokens for micro-compact
+MAX_SUMMARY_TOKENS = 2000           # Max tokens for a context summary
 
 # Token estimation calibration
 CHARS_PER_TOKEN = 3.8  # Calibrated for code+English mix
 
 
+# =============================================================================
+# Token Estimation (unchanged — these work well)
+# =============================================================================
+
 def estimate_tokens(text: str) -> int:
     """
     Estimate token count for a string.
     Uses a calibrated chars/token ratio that works well for code+English.
-    More accurate than simple len/4.
     """
     if not text:
         return 0
-    # Count different character types for better estimation
     ascii_chars = sum(1 for c in text if ord(c) < 128)
     non_ascii = len(text) - ascii_chars
-    # CJK and other multi-byte characters tend to be ~1 token each
-    # ASCII text averages ~3.8 chars per token
     return int(ascii_chars / CHARS_PER_TOKEN) + non_ascii + 1
 
 
@@ -56,11 +70,10 @@ def estimate_block_tokens(block: Any) -> int:
         elif block_type == "thinking":
             return estimate_tokens(block.get("thinking", ""))
         elif block_type == "tool_use":
-            # Tool calls: name + input
             return (
                 estimate_tokens(block.get("name", ""))
                 + estimate_tokens(json.dumps(block.get("input", {})))
-                + 20  # Overhead for tool_use structure
+                + 20
             )
         elif block_type == "tool_result":
             content = block.get("content", "")
@@ -69,12 +82,12 @@ def estimate_block_tokens(block: Any) -> int:
             elif isinstance(content, list):
                 return sum(estimate_block_tokens(b) for b in content) + 10
             return 10
-    return 5  # Default overhead per block
+    return 5
 
 
 def estimate_message_tokens(message: Dict) -> int:
     """Estimate tokens for a single message"""
-    tokens = 4  # Message overhead (role, structure)
+    tokens = 4
     content = message.get("content", "")
     if isinstance(content, str):
         tokens += estimate_tokens(content)
@@ -88,6 +101,10 @@ def estimate_messages_tokens(messages: List[Dict]) -> int:
     """Estimate total tokens for a message list"""
     return sum(estimate_message_tokens(msg) for msg in messages)
 
+
+# =============================================================================
+# Message Priority (enhanced with cost awareness)
+# =============================================================================
 
 class MessagePriority:
     """
@@ -106,10 +123,22 @@ class MessagePriority:
     LOW = 2
     COMPACTABLE = 1
 
+    # v10: Tools that indicate important state changes
+    HIGH_PRIORITY_TOOLS = frozenset({
+        "edit_file", "multi_edit", "write_file", "revert_edit",
+        "todo_write", "task_complete", "task",
+    })
+
+    # v10: Tools whose results are typically large but low-value for context
+    LOW_VALUE_RESULTS = frozenset({
+        "read_file", "batch_read", "list_dir", "glob",
+        "grep_search", "file_search", "web_fetch",
+        "view_truncated", "bash",
+    })
+
     @staticmethod
     def classify(message: Dict, index: int, total: int) -> int:
         """Classify a message's priority for compaction"""
-        # First message (user task) and last 4 messages are critical
         if index == 0:
             return MessagePriority.CRITICAL
         if index >= total - 4:
@@ -118,41 +147,50 @@ class MessagePriority:
         content = message.get("content", "")
         role = message.get("role", "")
 
-        # Check for important tool types in content
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict):
                     name = block.get("name", "")
-                    # File edits are HIGH priority
-                    if name in ("edit_file", "multi_edit", "write_file", "revert_edit"):
+                    if name in MessagePriority.HIGH_PRIORITY_TOOLS:
                         return MessagePriority.HIGH
-                    # Planning tools are HIGH
-                    if name in ("todo_write", "task_complete"):
-                        return MessagePriority.HIGH
-                    # Sub-agent results are HIGH
-                    if name == "task":
-                        return MessagePriority.HIGH
-                    # Tool results that are just reads are LOW
                     if block.get("type") == "tool_result":
                         return MessagePriority.LOW
 
-        # Assistant text responses are MEDIUM
         if role == "assistant" and isinstance(content, str):
             return MessagePriority.MEDIUM
 
         return MessagePriority.COMPACTABLE
 
+    @staticmethod
+    def classify_tool_result_value(tool_name: str, result: str) -> int:
+        """
+        v10: Classify how much of a tool result should be kept.
+        Returns max chars to retain in context.
+        """
+        if tool_name in MessagePriority.HIGH_PRIORITY_TOOLS:
+            return 5000   # Keep more for edits
+        if tool_name in ("web_search",):
+            return 3000   # Search results are medium value
+        if tool_name in MessagePriority.LOW_VALUE_RESULTS:
+            return 1000   # Aggressive truncation for reads
+        return 2000       # Default
+
+
+# =============================================================================
+# ContextManager v10 — Sliding Window + Progressive Compaction
+# =============================================================================
 
 class ContextManager:
     """
     Manages the conversation context window for the Agentic Loop.
 
-    Mirrors Claude Code's approach:
-    1. Track token usage in real-time
-    2. Trigger compaction at 92% capacity
-    3. Summarize low-priority messages
-    4. Keep critical context (first task, recent turns, edits)
-    5. Inject context summary for continuity
+    v10 KEY CHANGES:
+    1. Progressive micro-compaction every 5 turns (not just at 92%)
+    2. Sliding window of 4 recent turns at full fidelity
+    3. Aggressive tool result truncation for old turns
+    4. Budget-based compaction targeting ~40K tokens
+
+    Backwards-compatible: all v7 public methods preserved.
     """
 
     def __init__(
@@ -160,11 +198,25 @@ class ContextManager:
         max_tokens: int = MAX_CONTEXT_TOKENS,
         compact_threshold: int = COMPACT_THRESHOLD,
         target_after_compact: int = TARGET_AFTER_COMPACT,
+        # v10 params
+        sliding_window_size: int = SLIDING_WINDOW_SIZE,
+        micro_compact_interval: int = MICRO_COMPACT_INTERVAL,
+        micro_compact_budget: int = MICRO_COMPACT_BUDGET,
     ):
         self.max_tokens = max_tokens
         self.compact_threshold = compact_threshold
         self.target_after_compact = target_after_compact
+        # v10
+        self.sliding_window_size = sliding_window_size
+        self.micro_compact_interval = micro_compact_interval
+        self.micro_compact_budget = micro_compact_budget
         self._usage_history: List[int] = []
+        self._compaction_count = 0
+        self._total_tokens_saved = 0
+
+    # -------------------------------------------------------------------------
+    # Public API (v7 compatible)
+    # -------------------------------------------------------------------------
 
     def get_usage(self, messages: List[Dict]) -> Dict[str, Any]:
         """Get current context usage stats"""
@@ -177,11 +229,77 @@ class ContextManager:
             "usage_pct": round(pct * 100, 1),
             "needs_compact": current_tokens > self.compact_threshold,
             "messages_count": len(messages),
+            # v10: additional stats
+            "compaction_count": self._compaction_count,
+            "total_tokens_saved": self._total_tokens_saved,
         }
 
     def needs_compaction(self, messages: List[Dict]) -> bool:
-        """Check if compaction is needed"""
+        """Check if compaction is needed (v7 API preserved)"""
         return estimate_messages_tokens(messages) > self.compact_threshold
+
+    def needs_micro_compaction(self, messages: List[Dict], turn: int) -> bool:
+        """
+        v10: Check if progressive micro-compaction should run.
+        Triggers earlier and more often than full compaction.
+        """
+        if turn < self.micro_compact_interval:
+            return False
+        if turn % self.micro_compact_interval != 0:
+            return False
+        current = estimate_messages_tokens(messages)
+        return current > self.micro_compact_budget
+
+    async def micro_compact(
+        self,
+        messages: List[Dict],
+        turn: int,
+    ) -> List[Dict]:
+        """
+        v10: Progressive micro-compaction.
+
+        Strategy:
+        1. Keep first message (task definition)
+        2. Keep last SLIDING_WINDOW_SIZE*2 messages (recent turns)
+        3. For everything in between:
+           - Keep HIGH priority messages
+           - Truncate tool results aggressively
+           - Replace COMPACTABLE messages with one-line summaries
+        4. No AI call needed — this is purely mechanical
+
+        This runs every 5 turns and prevents the O(n²) cost growth.
+        """
+        total = len(messages)
+        window_keep = self.sliding_window_size * 2  # each turn = 2 messages (assistant + user/tool)
+
+        if total <= window_keep + 2:
+            return messages
+
+        before_tokens = estimate_messages_tokens(messages)
+
+        # Split: [first_msg] + [middle...] + [recent_window]
+        first_msg = messages[0]
+        middle = messages[1:total - window_keep]
+        recent = messages[total - window_keep:]
+
+        # Process middle: truncate and compress
+        compressed_middle = self._compress_middle(middle)
+
+        # Reconstruct
+        compacted = [first_msg] + compressed_middle + recent
+
+        after_tokens = estimate_messages_tokens(compacted)
+        saved = before_tokens - after_tokens
+        self._compaction_count += 1
+        self._total_tokens_saved += saved
+
+        logger.info(
+            f"[ContextManager v10] Micro-compact turn {turn}: "
+            f"{before_tokens}→{after_tokens} tokens "
+            f"({len(messages)}→{len(compacted)} msgs, saved {saved} tokens)"
+        )
+
+        return compacted
 
     async def compact(
         self,
@@ -190,54 +308,41 @@ class ContextManager:
         model: str = None,
     ) -> List[Dict]:
         """
-        Compact the context by summarizing older messages.
-
-        Strategy (matching Claude Code wU2):
-        1. Always keep: first message (task), last 4 messages (recent context)
-        2. Keep: HIGH priority messages (edits, plans)
-        3. Summarize: Everything else into a compact summary
-        4. Target: ~60% of max context after compaction
+        Full compaction (v7 API preserved).
+        Now used as safety net — micro_compact handles most cases.
         """
         total = len(messages)
         if total <= 6:
-            return messages  # Too few to compact
+            return messages
 
         current_tokens = estimate_messages_tokens(messages)
         logger.info(
-            f"[ContextManager] Compacting: {current_tokens} tokens "
+            f"[ContextManager] Full compacting: {current_tokens} tokens "
             f"({current_tokens/self.max_tokens*100:.1f}%) → target {self.target_after_compact}"
         )
 
-        # Classify all messages
         priorities = [
             MessagePriority.classify(msg, i, total)
             for i, msg in enumerate(messages)
         ]
 
-        # Always keep first message and last 4
         keep_indices = {0} | set(range(max(0, total - 4), total))
 
-        # Keep HIGH priority messages
         for i, (msg, prio) in enumerate(zip(messages, priorities)):
             if prio >= MessagePriority.HIGH:
                 keep_indices.add(i)
 
-        # Build summary of compactable messages
-        to_summarize = []
-        for i, (msg, prio) in enumerate(zip(messages, priorities)):
-            if i not in keep_indices:
-                to_summarize.append(msg)
+        to_summarize = [
+            msg for i, (msg, _) in enumerate(zip(messages, priorities))
+            if i not in keep_indices
+        ]
 
         if not to_summarize:
             return messages
 
-        # Generate summary
         summary_text = self._build_summary_input(to_summarize)
-        summary = await self._generate_summary(
-            summary_text, ai_engine, model
-        )
+        summary = await self._generate_summary(summary_text, ai_engine, model)
 
-        # Reconstruct messages: [first_msg, summary, kept_messages, last_4]
         keep_first = [messages[0]]
         kept_middle = [
             messages[i] for i in sorted(keep_indices)
@@ -254,12 +359,138 @@ class ContextManager:
         )
 
         new_tokens = estimate_messages_tokens(compacted)
+        saved = current_tokens - new_tokens
+        self._compaction_count += 1
+        self._total_tokens_saved += saved
+
         logger.info(
             f"[ContextManager] Compacted: {current_tokens} → {new_tokens} tokens "
             f"({len(messages)} → {len(compacted)} messages)"
         )
 
         return compacted
+
+    # -------------------------------------------------------------------------
+    # v10: Middle compression (mechanical, no AI needed)
+    # -------------------------------------------------------------------------
+
+    def _compress_middle(self, messages: List[Dict]) -> List[Dict]:
+        """
+        Compress middle messages without AI call.
+
+        Strategy:
+        - HIGH priority: keep but truncate tool results to 1000 chars
+        - MEDIUM: keep but truncate heavily (500 chars)
+        - LOW/COMPACTABLE: replace with one-line summary
+        """
+        total = len(messages)
+        compressed = []
+        summary_lines = []
+
+        for i, msg in enumerate(messages):
+            prio = MessagePriority.classify(msg, i + 1, total + 2)  # offset for first msg
+
+            if prio >= MessagePriority.HIGH:
+                # Keep but truncate tool results
+                compressed.append(self._truncate_message(msg, max_content=2000))
+            elif prio >= MessagePriority.MEDIUM:
+                compressed.append(self._truncate_message(msg, max_content=500))
+            else:
+                # Collect one-liner for batch summary
+                line = self._message_one_liner(msg)
+                if line:
+                    summary_lines.append(line)
+
+        # Bundle compactable messages into a single summary message
+        if summary_lines:
+            # Group into chunks of 10 to avoid one giant message
+            batch_summary = "\n".join(summary_lines[:30])
+            compressed.insert(0, {
+                "role": "user",
+                "content": f"[Earlier context — {len(summary_lines)} exchanges]\n{batch_summary}"
+            })
+            compressed.insert(1, {
+                "role": "assistant",
+                "content": "Understood, continuing with this context."
+            })
+
+        return compressed
+
+    def _truncate_message(self, msg: Dict, max_content: int = 2000) -> Dict:
+        """Truncate a message's content while preserving structure"""
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            if len(content) > max_content:
+                return {
+                    **msg,
+                    "content": content[:max_content] + "…[truncated]"
+                }
+            return msg
+
+        if isinstance(content, list):
+            truncated_blocks = []
+            for block in content:
+                if isinstance(block, dict):
+                    btype = block.get("type", "")
+                    if btype == "tool_result":
+                        # Aggressively truncate tool results
+                        result = block.get("content", "")
+                        if isinstance(result, str) and len(result) > max_content:
+                            truncated_blocks.append({
+                                **block,
+                                "content": result[:max_content] + "…[truncated]"
+                            })
+                        else:
+                            truncated_blocks.append(block)
+                    elif btype == "text":
+                        text = block.get("text", "")
+                        if len(text) > max_content:
+                            truncated_blocks.append({
+                                **block,
+                                "text": text[:max_content] + "…[truncated]"
+                            })
+                        else:
+                            truncated_blocks.append(block)
+                    else:
+                        truncated_blocks.append(block)
+                else:
+                    truncated_blocks.append(block)
+            return {**msg, "content": truncated_blocks}
+
+        return msg
+
+    def _message_one_liner(self, msg: Dict) -> Optional[str]:
+        """Extract a one-line summary of a message"""
+        content = msg.get("content", "")
+        role = msg.get("role", "")
+
+        if isinstance(content, str):
+            first_line = content.split("\n")[0][:120]
+            return f"[{role}] {first_line}"
+
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    btype = block.get("type", "")
+                    if btype == "tool_use":
+                        name = block.get("name", "?")
+                        desc = block.get("input", {}).get("description", "")[:60]
+                        parts.append(f"{name}({desc})")
+                    elif btype == "tool_result":
+                        result = str(block.get("content", ""))[:60]
+                        parts.append(f"→ {result}")
+                    elif btype == "text":
+                        parts.append(block.get("text", "")[:60])
+            if parts:
+                return f"[{role}] {' | '.join(parts[:3])}"
+
+        return None
+
+    # -------------------------------------------------------------------------
+    # Summarization (v7 preserved)
+    # -------------------------------------------------------------------------
 
     def _build_summary_input(self, messages: List[Dict]) -> str:
         """Build input text for summarization"""
@@ -282,8 +513,7 @@ class ContextManager:
                         elif btype == "tool_result":
                             result_str = str(block.get("content", ""))[:200]
                             lines.append(f"[tool_result]: {result_str}")
-
-        return "\n".join(lines[:60])  # Cap at 60 entries
+        return "\n".join(lines[:60])
 
     async def _generate_summary(
         self, summary_input: str, ai_engine=None, model: str = None
@@ -307,13 +537,11 @@ class ContextManager:
             except Exception as e:
                 logger.warning(f"[ContextManager] Summary generation failed: {e}")
 
-        # Fallback: mechanical summary
         return self._mechanical_summary(summary_input)
 
     def _mechanical_summary(self, summary_input: str) -> str:
         """Create a mechanical summary without AI"""
         lines = summary_input.split("\n")
-        # Extract tool calls and results
         tool_calls = []
         edits = []
         for line in lines:
@@ -331,6 +559,10 @@ class ContextManager:
         parts.append(f"- {len(lines)} total exchanges")
         return "\n".join(parts)
 
+    # -------------------------------------------------------------------------
+    # Utility methods (v7 preserved)
+    # -------------------------------------------------------------------------
+
     def inject_reminder(self, system_prompt: str, reminder: str) -> str:
         """Inject TODO status reminder into system prompt"""
         if reminder:
@@ -342,10 +574,8 @@ class ContextManager:
         if len(output) <= max_len:
             return output
 
-        # For JSON output, try to preserve structure
         try:
             data = json.loads(output)
-            # If it's a dict with 'content' key, truncate content
             if isinstance(data, dict) and "content" in data:
                 content = data["content"]
                 if isinstance(content, str) and len(content) > max_len - 500:
@@ -355,7 +585,6 @@ class ContextManager:
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # Default: head + tail truncation
         head_size = int(max_len * 0.7)
         tail_size = max_len - head_size - 100
         return (

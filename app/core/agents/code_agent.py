@@ -888,7 +888,7 @@ class EnhancedCodeAgent:
         self,
         ai_engine=None,
         work_dir: str = "./workspace",
-        model: str = "claude-opus-4-5-20251101",
+        model: str = "claude-opus-4-6",
         max_turns: int = 30
     ):
         self.ai_engine = ai_engine

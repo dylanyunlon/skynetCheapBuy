@@ -416,28 +416,89 @@ stop_service() {
     fi
 
     log_info "✅ 服务停止完成，端口 ${APP_PORT} 已释放"
+
+    # ★ v9: 额外等待确保 TCP TIME_WAIT 完全释放
+    sleep 2
 }
 
 start_service() {
     log_step "启动后端服务"
     cd "${PROJECT_DIR}"
 
+    # ★ v9 修复: 启动前确保端口已释放
+    PIDS_PRE=$(lsof -ti:${APP_PORT} 2>/dev/null || true)
+    if [ -n "$PIDS_PRE" ]; then
+        log_warn "启动前发现端口 ${APP_PORT} 仍被占用: ${PIDS_PRE}，强制清理..."
+        echo "$PIDS_PRE" | xargs kill -9 2>/dev/null || true
+        sleep 2
+    fi
+
+    # ★ v9 修复: 启动前确保 PostgreSQL 可连接 (防止 sqlalchemy e3q8 错误)
+    log_info "验证 PostgreSQL 连接..."
+    source "${PROJECT_DIR}/.env" 2>/dev/null || true
+    PG_READY=false
+    for i in $(seq 1 20); do
+        # 方法1: docker pg_isready
+        if command -v docker &>/dev/null && docker ps --format "{{.Names}}" | grep -qi "postgres"; then
+            PG_CONTAINER=$(docker ps --format "{{.Names}}" | grep -i postgres | head -1)
+            if docker exec ${PG_CONTAINER} pg_isready -U postgres &>/dev/null; then
+                PG_READY=true
+                break
+            fi
+        fi
+        # 方法2: 系统 pg_isready
+        if pg_isready -h localhost -p 5432 &>/dev/null 2>&1; then
+            PG_READY=true
+            break
+        fi
+        [ $i -eq 1 ] && log_info "等待 PostgreSQL 就绪..."
+        sleep 1
+    done
+    if $PG_READY; then
+        log_info "PostgreSQL 连接验证通过"
+    else
+        log_warn "PostgreSQL 连接验证超时，继续尝试启动 (可能仍会成功)..."
+    fi
+
     # 如果有 systemd service，使用它
     if [ -f "/etc/systemd/system/${PROJECT_NAME}.service" ]; then
         log_info "通过 systemd 启动 ${PROJECT_NAME}..."
         systemctl start ${PROJECT_NAME}
-        sleep 5
 
-        if systemctl is-active --quiet ${PROJECT_NAME}; then
-            log_info "✅ 服务启动成功 (systemd)"
+        # ★ v9 修复: 等待端口实际监听而不仅仅是 systemd active
+        log_info "等待服务就绪..."
+        SVC_READY=false
+        for i in $(seq 1 30); do
+            if ss -tlnp 2>/dev/null | grep -q ":${APP_PORT} "; then
+                SVC_READY=true
+                break
+            fi
+            sleep 1
+        done
+
+        if $SVC_READY; then
+            log_info "✅ 服务启动成功 (systemd, 端口 ${APP_PORT} 已监听)"
             log_info "   后端: https://${DOMAIN}:${BACKEND_PORT}"
             log_info "   文档: https://${DOMAIN}:${BACKEND_PORT}/docs"
             log_info "   日志: journalctl -u ${PROJECT_NAME} -f"
             return 0
         else
-            log_error "systemd 启动失败，回退到直接启动..."
+            # 检查 systemd 状态
+            if systemctl is-active --quiet ${PROJECT_NAME}; then
+                log_warn "systemd 显示 active 但端口未监听，等待更长时间..."
+                sleep 10
+                if ss -tlnp 2>/dev/null | grep -q ":${APP_PORT} "; then
+                    log_info "✅ 服务最终启动成功 (延迟)"
+                    return 0
+                fi
+            fi
+            log_error "systemd 启动失败或超时，回退到直接启动..."
             log_error "错误日志:"
             journalctl -u ${PROJECT_NAME} --no-pager -n 20 || true
+            systemctl stop ${PROJECT_NAME} 2>/dev/null || true
+            sleep 2
+            fuser -k ${APP_PORT}/tcp 2>/dev/null || true
+            sleep 1
         fi
     fi
 
@@ -584,6 +645,23 @@ create_systemd_service() {
 
     mkdir -p /var/log/${PROJECT_NAME}
 
+    # ★ v9: 创建启动前检查脚本 (避免 heredoc 变量展开问题)
+    cat > ${PROJECT_DIR}/pre_start.sh <<'PRESCRIPT'
+#!/bin/bash
+# 清理端口占用
+fuser -k 8000/tcp 2>/dev/null || true
+sleep 1
+# 等待 PostgreSQL 就绪
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    docker exec postgres pg_isready -U postgres >/dev/null 2>&1 && exit 0
+    pg_isready -h localhost -p 5432 >/dev/null 2>&1 && exit 0
+    sleep 1
+done
+echo "WARNING: PostgreSQL readiness check timed out, proceeding anyway"
+exit 0
+PRESCRIPT
+    chmod +x ${PROJECT_DIR}/pre_start.sh
+
     cat > /etc/systemd/system/${PROJECT_NAME}.service <<EOF
 [Unit]
 Description=skynetCheapBuy API Service
@@ -598,8 +676,8 @@ Environment="PATH=${VENV_DIR}/bin:/usr/bin:/usr/local/bin"
 Environment="PYTHONPATH=${PROJECT_DIR}"
 Environment="PYTHONUNBUFFERED=1"
 
-# ★ 修复: 启动前强制清理端口，防止 [Errno 98] address already in use
-ExecStartPre=/bin/bash -c 'fuser -k ${APP_PORT}/tcp 2>/dev/null || true; sleep 1'
+# ★ v9 修复: 启动前清理端口 + 验证 DB 就绪
+ExecStartPre=/bin/bash ${PROJECT_DIR}/pre_start.sh
 
 # ★ 修复: --log-config 使用 JSON 格式，解决 KeyError: 'formatters'
 ExecStart=${UVICORN_BIN} app.main:app --host 0.0.0.0 --port ${APP_PORT} --workers ${WORKERS} --log-level ${LOG_LEVEL} --log-config ${PROJECT_DIR}/config/logging_config.json
