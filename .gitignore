@@ -1,16 +1,15 @@
 __pycache__/
 *.pyc
-
 # Virtual environment
 .venv/
 venv/
-
 # Runtime files
 server.pid
-logs/*.log
-logs/*.gz
+# Logs - ignore everything in logs directory
+logs/
+*.log
+*.log.*
 *.log*
-
-logs/error.log
-
+*.gz
+# Review
 _review/
