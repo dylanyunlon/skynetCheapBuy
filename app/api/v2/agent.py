@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi.responses import FileResponse, JSONResponse
 from typing import Dict, Any, List
 from sqlalchemy.orm import Session
 import uuid
@@ -296,3 +297,113 @@ async def agentic_create_project(
     except Exception as e:
         logger.error(f"[Agentic] Project creation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+# =============================================================================
+# Phase 7: File upload/download endpoints for All Domains Code Execution
+# =============================================================================
+
+@router.post("/upload-file")
+async def upload_file(
+    file: UploadFile = File(...),
+    project_id: str = Query(None),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload a file to the agent's workspace."""
+    user_id = str(current_user.id) if isinstance(current_user.id, uuid.UUID) else current_user.id
+    
+    # Determine work_dir
+    if project_id:
+        work_dir = os.path.join("/tmp/cheapbuy_workspaces", user_id, project_id)
+    else:
+        work_dir = os.path.join("/tmp/cheapbuy_workspaces", user_id, "default")
+    os.makedirs(work_dir, exist_ok=True)
+    
+    # Sanitize filename
+    safe_name = os.path.basename(file.filename or "uploaded_file")
+    dest = os.path.join(work_dir, safe_name)
+    
+    try:
+        content = await file.read()
+        with open(dest, "wb") as f:
+            f.write(content)
+        return JSONResponse({
+            "success": True,
+            "filename": safe_name,
+            "path": dest,
+            "size": len(content),
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/download/{filename}")
+async def download_file(
+    filename: str,
+    project_id: str = Query(None),
+    session_path: str = Query(None),
+    current_user: User = Depends(get_current_user),
+):
+    """Download a file from the agent's workspace."""
+    user_id = str(current_user.id) if isinstance(current_user.id, uuid.UUID) else current_user.id
+    
+    # Sanitize filename (prevent path traversal)
+    safe_name = os.path.basename(filename)
+    
+    # Try multiple possible locations
+    search_paths = []
+    if session_path:
+        search_paths.append(os.path.join(session_path, safe_name))
+    if project_id:
+        search_paths.append(os.path.join("/tmp/cheapbuy_workspaces", user_id, project_id, safe_name))
+    search_paths.append(os.path.join("/tmp/cheapbuy_workspaces", user_id, "default", safe_name))
+    
+    for path in search_paths:
+        real_path = os.path.realpath(path)
+        # Security: ensure within workspace
+        if real_path.startswith("/tmp/cheapbuy_workspaces") and os.path.isfile(real_path):
+            return FileResponse(
+                real_path,
+                filename=safe_name,
+                media_type="application/octet-stream"
+            )
+    
+    raise HTTPException(status_code=404, detail=f"File not found: {safe_name}")
+
+
+@router.get("/workspace-files")
+async def list_workspace_files(
+    project_id: str = Query(None),
+    current_user: User = Depends(get_current_user),
+):
+    """List files in the agent's workspace."""
+    user_id = str(current_user.id) if isinstance(current_user.id, uuid.UUID) else current_user.id
+    
+    if project_id:
+        work_dir = os.path.join("/tmp/cheapbuy_workspaces", user_id, project_id)
+    else:
+        work_dir = os.path.join("/tmp/cheapbuy_workspaces", user_id, "default")
+    
+    if not os.path.isdir(work_dir):
+        return JSONResponse({"files": [], "work_dir": work_dir})
+    
+    files = []
+    for root, dirs, filenames in os.walk(work_dir):
+        # Skip hidden dirs
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for fname in filenames:
+            if fname.startswith('.'):
+                continue
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, work_dir)
+            try:
+                stat = os.stat(fpath)
+                files.append({
+                    "name": fname,
+                    "path": rel,
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                })
+            except OSError:
+                pass
+    
+    return JSONResponse({"files": files, "work_dir": work_dir, "total": len(files)})

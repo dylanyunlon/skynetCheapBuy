@@ -453,12 +453,70 @@ TOOL_DEFINITIONS = [
             "required": ["path"]
         }
     },
+    # === Phase 7 工具: All Domains Code Execution ===
+    {
+        "name": "execute_code",
+        "description": (
+            "Execute code in a specified language. Creates a temporary file, runs it with "
+            "the appropriate interpreter, and returns stdout/stderr/exit_code. "
+            "Supported languages: python, shell, javascript (node). Default: python."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Code to execute"},
+                "language": {"type": "string", "enum": ["python", "shell", "javascript"],
+                             "description": "Programming language (default: python)"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default: 120, max: 600)"},
+                "description": {"type": "string", "description": "What this code does"}
+            },
+            "required": ["code"]
+        }
+    },
+    {
+        "name": "install_package",
+        "description": (
+            "Install a package using pip, npm, or apt. Returns stdout/stderr/exit_code. "
+            "Default manager: pip. Use flags for extra options like --quiet, --user, etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "package": {"type": "string", "description": "Package name(s), space-separated for multiple"},
+                "manager": {"type": "string", "enum": ["pip", "npm", "apt"],
+                            "description": "Package manager (default: pip)"},
+                "flags": {"type": "string", "description": "Extra flags (e.g. --quiet, --save-dev)"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default: 300)"},
+                "description": {"type": "string", "description": "Why installing this package"}
+            },
+            "required": ["package"]
+        }
+    },
+    {
+        "name": "present_files",
+        "description": (
+            "Make files available for download. Provide a list of file paths. "
+            "Returns metadata (filename, size, download_path) for each file. "
+            "Files must be within the project workspace."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "paths": {"type": "array", "items": {"type": "string"},
+                          "description": "List of file paths to present"},
+                "description": {"type": "string", "description": "What these files are"}
+            },
+            "required": ["paths"]
+        }
+    },
 ]
 # =============================================================================
 
 AGENTIC_SYSTEM_PROMPT = """You are an expert software engineer working in a Linux environment.
 You have tools to read/write/edit files, run bash commands, search code, browse the web,
-plan tasks with todo_write, delegate work to sub-agents, and debug with debug_test.
+plan tasks with todo_write, delegate work to sub-agents, debug with debug_test,
+execute code with execute_code, install packages with install_package,
+and present files for download with present_files.
 
 ## Core Workflow (Claude Code Style)
 1. **Plan first**: Use todo_write to create a structured task list for any non-trivial task.
@@ -468,6 +526,9 @@ plan tasks with todo_write, delegate work to sub-agents, and debug with debug_te
 5. **Debug**: If tests fail, read error -> read file -> fix -> re-test. Use revert_to_checkpoint if a fix causes regression.
 6. **Track progress**: Update todo_write as you complete each step.
 7. **Record knowledge**: Use memory_write to save important project info.
+8. **Code execution**: Use execute_code to run Python/JS/Shell snippets in isolation.
+9. **Package management**: Use install_package to add pip/npm dependencies.
+10. **File delivery**: Use present_files to make output files downloadable.
 
 ## Tool Usage Guidelines
 
@@ -590,6 +651,10 @@ class ToolExecutor:
             # v9: New tool handlers
             "debug_test": self._debug_test,
             "revert_to_checkpoint": self._revert_to_checkpoint,
+            # Phase 7: All Domains Code Execution
+            "execute_code": self._execute_code,
+            "install_package": self._install_package,
+            "present_files": self._present_files,
         }
         handler = handlers.get(tool_name)
         if not handler:
@@ -1211,6 +1276,168 @@ class ToolExecutor:
         except Exception as e:
             return json.dumps({"error": f"Revert failed: {str(e)}"})
 
+    # === Phase 7: All Domains Code Execution tools ===
+
+    async def _execute_code(self, params: Dict) -> str:
+        """Execute code by creating a temp file and running with interpreter."""
+        code = params.get("code", "")
+        language = params.get("language", "python")
+        timeout = min(params.get("timeout", 120), 600)
+
+        # Map language to interpreter and file extension
+        lang_map = {
+            "python": {"interpreter": "python3", "ext": ".py"},
+            "shell": {"interpreter": "bash", "ext": ".sh"},
+            "javascript": {"interpreter": "node", "ext": ".js"},
+        }
+        lang_info = lang_map.get(language, lang_map["python"])
+        interpreter = lang_info["interpreter"]
+        ext = lang_info["ext"]
+
+        # Create temp file in work_dir
+        tmp_file = os.path.join(self.work_dir, f"_exec_tmp_{uuid.uuid4().hex[:8]}{ext}")
+        try:
+            with open(tmp_file, 'w', encoding='utf-8') as f:
+                f.write(code)
+
+            proc = await asyncio.create_subprocess_exec(
+                interpreter, tmp_file,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=self.work_dir,
+                env={**os.environ, "HOME": self.work_dir, "PWD": self.work_dir}
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            out = stdout.decode('utf-8', errors='replace')
+            err = stderr.decode('utf-8', errors='replace')
+
+            if len(out) > MAX_TOOL_OUTPUT_LEN:
+                out = out[:MAX_TOOL_OUTPUT_LEN // 2] + f"\n...[truncated]...\n" + out[-MAX_TOOL_OUTPUT_LEN // 2:]
+
+            return json.dumps({
+                "exit_code": proc.returncode,
+                "stdout": out,
+                "stderr": err,
+                "language": language,
+            })
+        except asyncio.TimeoutError:
+            return json.dumps({"error": f"Code execution timed out after {timeout}s", "exit_code": -1, "language": language})
+        except FileNotFoundError:
+            return json.dumps({"error": f"Interpreter '{interpreter}' not found. Is {language} installed?", "exit_code": -1, "language": language})
+        except Exception as e:
+            return json.dumps({"error": f"Execution failed: {str(e)}", "exit_code": -1, "language": language})
+        finally:
+            if os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass
+
+    async def _install_package(self, params: Dict) -> str:
+        """Install package via pip/npm/apt."""
+        package = params.get("package", "")
+        manager = params.get("manager", "pip")
+        flags = params.get("flags", "")
+        timeout = min(params.get("timeout", 300), 600)
+
+        if not package:
+            return json.dumps({"error": "No package specified", "exit_code": -1, "manager": manager})
+
+        # Sanitize: reject obvious shell injection (semicolons, backticks, pipes)
+        if any(c in package for c in [';', '`', '|', '$', '>', '<', '&']):
+            return json.dumps({"error": "Invalid characters in package name", "exit_code": -1, "manager": manager})
+
+        # Build command
+        if manager == "pip":
+            cmd = f"pip install {package} --break-system-packages"
+        elif manager == "npm":
+            cmd = f"npm install {package}"
+        elif manager == "apt":
+            cmd = f"apt-get install -y {package}"
+        else:
+            return json.dumps({"error": f"Unknown manager: {manager}", "exit_code": -1, "manager": manager})
+
+        if flags:
+            # Sanitize flags too
+            safe_flags = flags.replace(';', '').replace('`', '').replace('|', '')
+            cmd += f" {safe_flags}"
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=self.work_dir,
+                env={**os.environ, "HOME": self.work_dir, "PWD": self.work_dir}
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            out = stdout.decode('utf-8', errors='replace')
+            err = stderr.decode('utf-8', errors='replace')
+            return json.dumps({
+                "exit_code": proc.returncode,
+                "stdout": out,
+                "stderr": err,
+                "manager": manager,
+                "package": package,
+            })
+        except asyncio.TimeoutError:
+            return json.dumps({"error": f"Installation timed out after {timeout}s", "exit_code": -1, "manager": manager})
+        except Exception as e:
+            return json.dumps({"error": f"Install failed: {str(e)}", "exit_code": -1, "manager": manager})
+
+    async def _present_files(self, params: Dict) -> str:
+        """Make files available for download by returning metadata."""
+        paths = params.get("paths", [])
+        if not paths:
+            return json.dumps({"success": False, "error": "No paths provided", "files": []})
+
+        files = []
+        has_error = False
+        for p in paths:
+            resolved = self._resolve(p)
+
+            # Security: block files outside work_dir
+            try:
+                real_path = os.path.realpath(resolved)
+                real_work = os.path.realpath(self.work_dir)
+                if not real_path.startswith(real_work):
+                    files.append({"path": p, "error": "File outside workspace"})
+                    has_error = True
+                    continue
+            except Exception:
+                files.append({"path": p, "error": "Invalid path"})
+                has_error = True
+                continue
+
+            if not os.path.exists(resolved):
+                files.append({"path": p, "error": "File not found"})
+                has_error = True
+                continue
+
+            if os.path.isdir(resolved):
+                files.append({"path": p, "error": "Path is a directory, not a file"})
+                has_error = True
+                continue
+
+            try:
+                stat = os.stat(resolved)
+                filename = os.path.basename(resolved)
+                files.append({
+                    "filename": filename,
+                    "path": resolved,
+                    "download_path": f"/api/v2/agent/download/{filename}",
+                    "size": stat.st_size,
+                    "size_bytes": stat.st_size,
+                })
+            except Exception as e:
+                files.append({"path": p, "error": str(e)})
+                has_error = True
+
+        all_ok = len(files) > 0 and not has_error
+        return json.dumps({
+            "success": all_ok,
+            "files": files,
+            "total": len(files),
+        })
+
     # === Utility methods ===
 
     def _resolve(self, path: str) -> str:
@@ -1284,6 +1511,7 @@ def build_turn_summary(tool_uses: List[Dict]) -> Dict[str, Any]:
         "todo_write": "list-todo", "todo_read": "list-checks",
         "task": "git-branch", "memory_read": "brain", "memory_write": "brain",
         "debug_test": "bug", "revert_to_checkpoint": "rotate-ccw",
+        "execute_code": "play", "install_package": "package", "present_files": "download",
     }
 
     for tu in tool_uses:
@@ -1405,6 +1633,17 @@ def _auto_title(name, inp):
         return f"Test: {inp.get('description', inp.get('command', '')[:60])}"
     elif name == "revert_to_checkpoint":
         return f"Revert: {inp.get('description', inp.get('path', 'file'))}"
+    elif name == "execute_code":
+        lang = inp.get("language", "python")
+        desc = inp.get("description", "")
+        return f"Execute {lang}: {desc}" if desc else f"Execute {lang} code"
+    elif name == "install_package":
+        mgr = inp.get("manager", "pip")
+        pkg = inp.get("package", "")
+        return f"{mgr} install {pkg}"
+    elif name == "present_files":
+        n = len(inp.get("paths", []))
+        return f"Present {n} file{'s' if n != 1 else ''}"
     return name
 
 
