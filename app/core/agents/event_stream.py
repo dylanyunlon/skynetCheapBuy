@@ -253,6 +253,121 @@ class EventBuilder:
             "parallel_calls": parallel_calls,
         }, turn=turn)
 
+    # =================================================================
+    # Claude API SSE Protocol — event stream format alignment
+    # Matches the Claude API streaming format:
+    #   message_start → content_block_start → content_block_delta(s) →
+    #   content_block_stop → message_delta → message_stop
+    # =================================================================
+
+    def message_start(self, message_id: str, model: str) -> Dict:
+        """Emit message_start matching Claude API format."""
+        return {
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+            },
+            "timestamp": time.time(),
+        }
+
+    def content_block_start(self, index: int, block_type: str,
+                            tool_id: str = None, tool_name: str = None,
+                            message: str = None) -> Dict:
+        """Emit content_block_start for thinking/text/tool_use blocks."""
+        content_block: Dict[str, Any] = {"type": block_type}
+        ts = time.time()
+
+        if block_type == "thinking":
+            content_block.update({
+                "thinking": "",
+                "start_timestamp": ts,
+                "stop_timestamp": None,
+            })
+        elif block_type == "text":
+            content_block.update({
+                "text": "",
+                "start_timestamp": ts,
+                "stop_timestamp": None,
+            })
+        elif block_type == "tool_use":
+            content_block.update({
+                "id": tool_id or "",
+                "name": tool_name or "",
+                "input": {},
+                "message": message or "",
+                "start_timestamp": ts,
+                "stop_timestamp": None,
+            })
+
+        return {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": content_block,
+            "timestamp": time.time(),
+        }
+
+    def content_block_delta(self, index: int, delta_type: str, **kwargs) -> Dict:
+        """Emit content_block_delta for streaming content.
+
+        delta_type can be:
+          - thinking_delta: kwargs has 'thinking'
+          - text_delta: kwargs has 'text'
+          - input_json_delta: kwargs has 'partial_json'
+          - tool_use_block_update_delta: kwargs has 'message'
+          - thinking_summary_delta: kwargs has 'summary'
+        """
+        delta: Dict[str, Any] = {"type": delta_type}
+
+        if delta_type == "thinking_delta":
+            delta["thinking"] = kwargs.get("thinking", "")
+        elif delta_type == "text_delta":
+            delta["text"] = kwargs.get("text", "")
+        elif delta_type == "input_json_delta":
+            delta["partial_json"] = kwargs.get("partial_json", "")
+        elif delta_type == "tool_use_block_update_delta":
+            delta["message"] = kwargs.get("message", "")
+            if "display_content" in kwargs:
+                delta["display_content"] = kwargs["display_content"]
+        elif delta_type == "thinking_summary_delta":
+            delta["summary"] = kwargs.get("summary", {})
+
+        return {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": delta,
+            "timestamp": time.time(),
+        }
+
+    def content_block_stop(self, index: int) -> Dict:
+        """Emit content_block_stop."""
+        return {
+            "type": "content_block_stop",
+            "index": index,
+            "stop_timestamp": time.time(),
+            "timestamp": time.time(),
+        }
+
+    def message_delta(self, stop_reason: str = "end_turn") -> Dict:
+        """Emit message_delta with stop_reason."""
+        return {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason},
+            "timestamp": time.time(),
+        }
+
+    def message_stop(self) -> Dict:
+        """Emit message_stop."""
+        return {
+            "type": "message_stop",
+            "timestamp": time.time(),
+        }
+
 
 def format_sse(event: Dict) -> str:
     data = json.dumps(event, ensure_ascii=False)
