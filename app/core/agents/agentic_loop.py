@@ -1900,19 +1900,86 @@ class AgenticLoop:
             if not content_blocks and result.get("content"):
                 content_blocks = [{"type": "text", "text": result["content"]}]
 
-            # Yield text + thinking + tool_start events
+            # === v14: Claude API SSE Protocol + v9 backwards compat ===
+            # Emit message_start at the beginning of each turn's response
+            import uuid as _uuid
+            msg_id = f"msg_{_uuid.uuid4().hex[:12]}"
+            yield self.event_builder.message_start(
+                message_id=msg_id, model=self.model
+            )
+
+            # Yield content blocks with Claude API lifecycle wrapping
+            block_index = 0
             for block in content_blocks:
                 if block.get("type") == "text" and block.get("text"):
+                    # Claude API: content_block_start → text_delta(s) → content_block_stop
+                    yield self.event_builder.content_block_start(
+                        index=block_index, block_type="text"
+                    )
+                    yield self.event_builder.content_block_delta(
+                        index=block_index, delta_type="text_delta",
+                        text=block["text"]
+                    )
+                    yield self.event_builder.content_block_stop(index=block_index)
+                    # v9 compat: also emit v9 text event
                     yield self.event_builder.text(block["text"], turn)
+                    block_index += 1
+
                 elif block.get("type") == "thinking" and block.get("thinking"):
+                    # Claude API: content_block_start → thinking_delta(s) → stop
+                    yield self.event_builder.content_block_start(
+                        index=block_index, block_type="thinking"
+                    )
+                    yield self.event_builder.content_block_delta(
+                        index=block_index, delta_type="thinking_delta",
+                        thinking=block["thinking"]
+                    )
+                    # Emit summary if available
+                    thinking_text = block["thinking"]
+                    summary_text = thinking_text[:120] + "..." if len(thinking_text) > 120 else thinking_text
+                    yield self.event_builder.content_block_delta(
+                        index=block_index, delta_type="thinking_summary_delta",
+                        summary={"summary": summary_text}
+                    )
+                    yield self.event_builder.content_block_stop(index=block_index)
+                    # v9 compat
                     yield self.event_builder.thinking(block["thinking"], turn)
+                    block_index += 1
+
                 elif block.get("type") == "tool_use":
                     tinp = block.get("input", {})
                     desc = tinp.get("description", _auto_title(block["name"], tinp))
+                    # Claude API: content_block_start(tool_use) → input_json_delta → update → stop
+                    yield self.event_builder.content_block_start(
+                        index=block_index, block_type="tool_use",
+                        tool_id=block["id"], tool_name=block["name"],
+                        message=desc
+                    )
+                    # Stream the input JSON
+                    import json as _json
+                    input_str = _json.dumps(tinp, ensure_ascii=False)
+                    yield self.event_builder.content_block_delta(
+                        index=block_index, delta_type="input_json_delta",
+                        partial_json=input_str
+                    )
+                    # Description update
+                    yield self.event_builder.content_block_delta(
+                        index=block_index, delta_type="tool_use_block_update_delta",
+                        message=desc
+                    )
+                    yield self.event_builder.content_block_stop(index=block_index)
+                    # v9 compat
                     yield self.event_builder.tool_start(
                         tool=block["name"], args=tinp,
                         tool_use_id=block["id"], description=desc, turn=turn
                     )
+                    block_index += 1
+
+            # Emit message_delta + message_stop to close the turn
+            yield self.event_builder.message_delta(
+                stop_reason="tool_use" if tool_uses else "end_turn"
+            )
+            yield self.event_builder.message_stop()
 
             messages.append({"role": "assistant", "content": content_blocks})
 
