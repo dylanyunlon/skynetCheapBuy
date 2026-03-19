@@ -375,3 +375,16 @@ def format_sse(event: Dict) -> str:
 
 def format_sse_heartbeat() -> str:
     return f"data: {json.dumps({'type': 'heartbeat', 'timestamp': time.time()})}\n\n"
+
+
+def format_sse_with_event(event: Dict) -> str:
+    """Format event as SSE with 'event: xxx' prefix line + 'data: {...}' line.
+
+    Matches the Claude API SSE format:
+        event: content_block_start
+        data: {"type":"content_block_start",...}
+
+    """
+    event_type = event.get("type", "message")
+    data = json.dumps(event, ensure_ascii=False)
+    return f"event: {event_type}\ndata: {data}\n\n"
