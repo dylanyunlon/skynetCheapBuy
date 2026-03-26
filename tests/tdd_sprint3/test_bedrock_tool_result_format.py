@@ -408,8 +408,8 @@ class TestNoRegressions:
         assert result[0]["role"] == "user"
         assert result[1]["role"] == "assistant"
 
-    def test_thinking_blocks_preserved(self):
-        """thinking blocks in assistant content should not be dropped"""
+    def test_thinking_blocks_stripped(self):
+        """thinking blocks must be stripped — Bedrock rejects them in requests"""
         from app.core.ai_engine import ClaudeCompatibleProvider
         normalize = ClaudeCompatibleProvider._normalize_for_bedrock
         messages = [
@@ -420,8 +420,20 @@ class TestNoRegressions:
         ]
         result = normalize(messages)
         types = [b["type"] for b in result[0]["content"]]
-        assert "thinking" in types
-        assert "text" in types
+        assert "thinking" not in types, "thinking blocks must be stripped for Bedrock"
+        assert "text" in types, "text blocks must be preserved"
+
+    def test_thinking_only_message_not_empty(self):
+        """If assistant has ONLY thinking blocks, result should not be empty"""
+        from app.core.ai_engine import ClaudeCompatibleProvider
+        normalize = ClaudeCompatibleProvider._normalize_for_bedrock
+        messages = [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "let me think..."},
+            ]}
+        ]
+        result = normalize(messages)
+        assert len(result[0]["content"]) > 0, "Must not produce empty content array"
 
 
 if __name__ == "__main__":

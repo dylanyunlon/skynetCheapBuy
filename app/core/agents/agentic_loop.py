@@ -1717,7 +1717,10 @@ async def run_subagent(ai_engine, work_dir, prompt, subagent_type="general",
             if b.get("type") == "text" and b.get("text"):
                 all_text.append(b["text"])
 
-        messages.append({"role": "assistant", "content": content_blocks})
+        sendable = [b for b in content_blocks if b.get("type") in ("text", "tool_use")]
+        if not sendable:
+            sendable = [{"type": "text", "text": "(empty)"}]
+        messages.append({"role": "assistant", "content": sendable})
         if not tool_uses:
             break
 
@@ -1999,7 +2002,16 @@ class AgenticLoop:
             )
             yield self.event_builder.message_stop()
 
-            messages.append({"role": "assistant", "content": content_blocks})
+            # Filter out thinking blocks before adding to message history.
+            # Bedrock (behind tryallai.com proxy) rejects 'thinking' type
+            # in request messages. Keep only text + tool_use blocks.
+            sendable_blocks = [
+                b for b in content_blocks
+                if b.get("type") in ("text", "tool_use")
+            ]
+            if not sendable_blocks:
+                sendable_blocks = [{"type": "text", "text": "(empty)"}]
+            messages.append({"role": "assistant", "content": sendable_blocks})
 
             # Usage event
             yield self.event_builder.usage(

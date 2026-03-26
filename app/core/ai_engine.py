@@ -504,6 +504,13 @@ class ClaudeCompatibleProvider(AIProvider):
 
                     btype = block.get("type")
 
+                    # Strip thinking blocks — Bedrock does not accept
+                    # 'thinking' type in request messages. The thinking
+                    # content was already emitted to the frontend via SSE;
+                    # it must not be sent back to the API.
+                    if btype == "thinking":
+                        continue
+
                     # Fix tool_result with string content → wrap in list
                     if btype == "tool_result":
                         inner = block.get("content")
