@@ -84,6 +84,24 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
 
+def _make_tool_result(tool_use_id: str, content: str) -> Dict[str, Any]:
+    """
+    Build a properly formatted tool_result block.
+
+    AWS Bedrock (behind proxies like tryallai.com) requires the `content`
+    field inside tool_result to be a **list** of content blocks, not a plain
+    string.  The direct Anthropic API accepts both, so using the list format
+    is universally safe.
+
+    See: https://docs.aws.amazon.com/bedrock/latest/APIReference/
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": [{"type": "text", "text": content}],
+    }
+
+
 # =============================================================================
 # 工具定义 (保持 API 兼容)
 # =============================================================================
@@ -1712,7 +1730,7 @@ async def run_subagent(ai_engine, work_dir, prompt, subagent_type="general",
             rs = await executor.execute(tn, ti)
             if len(rs) > MAX_TOOL_OUTPUT_LEN:
                 rs = rs[:MAX_TOOL_OUTPUT_LEN] + "\n...[truncated]"
-            tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": rs})
+            tool_results.append(_make_tool_result(tid, rs))
         messages.append({"role": "user", "content": tool_results})
 
     return {"success": True, "summary": "\n".join(all_text) or "SubAgent completed.",
@@ -2060,7 +2078,7 @@ class AgenticLoop:
                                 result=rs[:MAX_DISPLAY_RESULT], result_meta=meta,
                                 success=success, turn=turn
                             )
-                            tool_results.append({"type": "tool_result", "tool_use_id": sc.tool_use_id, "content": rs})
+                            tool_results.append(_make_tool_result(sc.tool_use_id, rs))
                             if sc.tool_name in ("todo_write", "todo_read"):
                                 yield self.event_builder.todo_update(turn, self.executor.todo_manager.read())
                             if sc.tool_name == "task_complete":
@@ -2084,7 +2102,7 @@ class AgenticLoop:
                                 result=rs[:MAX_DISPLAY_RESULT], result_meta=meta,
                                 success=success, turn=turn, duration_ms=tool_duration_ms
                             )
-                            tool_results.append({"type": "tool_result", "tool_use_id": sc.tool_use_id, "content": rs})
+                            tool_results.append(_make_tool_result(sc.tool_use_id, rs))
                             if sc.tool_name in ("todo_write", "todo_read"):
                                 yield self.event_builder.todo_update(turn, self.executor.todo_manager.read())
                             if sc.tool_name == "task_complete":
@@ -2107,7 +2125,7 @@ class AgenticLoop:
                         result_meta=meta, success=success,
                         turn=turn, duration_ms=tool_duration_ms
                     )
-                    tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": rs})
+                    tool_results.append(_make_tool_result(tid, rs))
                     if tn in ("todo_write", "todo_read"):
                         yield self.event_builder.todo_update(turn, self.executor.todo_manager.read())
                     if tn == "task_complete":
@@ -2154,7 +2172,7 @@ class AgenticLoop:
                     tool="task", tool_use_id=tid, result=rs[:MAX_DISPLAY_RESULT],
                     result_meta=meta, success="error" not in rs.lower()[:50], turn=turn
                 )
-                tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": rs})
+                tool_results.append(_make_tool_result(tid, rs))
 
             # File change events
             for ch in self.executor.file_changes[fc_before:]:

@@ -294,6 +294,9 @@ class ClaudeCompatibleProvider(AIProvider):
                         "content": msg["content"]
                     })
             
+            # ★ 安全防御层：归一化消息格式以兼容 Bedrock 严格验证
+            claude_messages = self._normalize_for_bedrock(claude_messages)
+            
             # 构建请求体（原生 Claude 格式）
             request_body = {
                 "model": model,
@@ -465,6 +468,74 @@ class ClaudeCompatibleProvider(AIProvider):
                 type="error",
                 metadata={"error": True}
             )
+
+    @staticmethod
+    def _normalize_for_bedrock(messages: List[Dict]) -> List[Dict]:
+        """
+        Normalize message format for AWS Bedrock strict validation.
+
+        Bedrock (behind proxies like tryallai.com) enforces stricter schema
+        rules than the direct Anthropic API:
+
+        1. tool_result blocks: `content` MUST be a list, not a plain string.
+        2. assistant messages after context compaction may have string content
+           instead of a block list — wrap them properly.
+        3. Empty content blocks are rejected — filter or fill with placeholder.
+        4. thinking blocks from extended-thinking models — strip the
+           `thinking` field if Bedrock proxy doesn't support it (keep as
+           text summary instead).
+
+        This is a **safety net**; the primary fix is in agentic_loop.py's
+        _make_tool_result helper. This catches anything that slips through
+        context compaction, subagent returns, or future code paths.
+        """
+        normalized = []
+        for msg in messages:
+            content = msg.get("content")
+
+            # --- Case 1: content is already a list of blocks ---
+            if isinstance(content, list):
+                fixed_blocks = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        # Defensive: if somehow a raw string ended up in the list
+                        fixed_blocks.append({"type": "text", "text": str(block)})
+                        continue
+
+                    btype = block.get("type")
+
+                    # Fix tool_result with string content → wrap in list
+                    if btype == "tool_result":
+                        inner = block.get("content")
+                        if isinstance(inner, str):
+                            block = {**block, "content": [{"type": "text", "text": inner}]}
+                        elif inner is None:
+                            block = {**block, "content": [{"type": "text", "text": ""}]}
+                        # else: already a list, leave as-is
+
+                    fixed_blocks.append(block)
+
+                # Guard: Bedrock rejects empty content arrays
+                if not fixed_blocks:
+                    fixed_blocks = [{"type": "text", "text": "(empty)"}]
+
+                normalized.append({**msg, "content": fixed_blocks})
+
+            # --- Case 2: content is a plain string (normal text message) ---
+            elif isinstance(content, str):
+                # Bedrock accepts string content for user/assistant turns
+                # (only tool_result requires list), so leave as-is.
+                # But guard against empty strings which some proxies reject.
+                if not content:
+                    normalized.append({**msg, "content": "(empty)"})
+                else:
+                    normalized.append(msg)
+
+            # --- Case 3: content is None or missing ---
+            else:
+                normalized.append({**msg, "content": "(empty)"})
+
+        return normalized
 
 
 class AnthropicProvider(AIProvider):

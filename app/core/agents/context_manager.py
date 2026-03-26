@@ -435,12 +435,28 @@ class ContextManager:
                     btype = block.get("type", "")
                     if btype == "tool_result":
                         # Aggressively truncate tool results
+                        # content must remain a list for Bedrock compatibility
                         result = block.get("content", "")
-                        if isinstance(result, str) and len(result) > max_content:
+                        if isinstance(result, str):
+                            # Legacy string format — convert to list
+                            truncated_text = result[:max_content] + "…[truncated]" if len(result) > max_content else result
                             truncated_blocks.append({
                                 **block,
-                                "content": result[:max_content] + "…[truncated]"
+                                "content": [{"type": "text", "text": truncated_text}]
                             })
+                        elif isinstance(result, list):
+                            # Already list format — truncate text blocks inside
+                            truncated_inner = []
+                            for inner in result:
+                                if isinstance(inner, dict) and inner.get("type") == "text":
+                                    t = inner.get("text", "")
+                                    if len(t) > max_content:
+                                        truncated_inner.append({**inner, "text": t[:max_content] + "…[truncated]"})
+                                    else:
+                                        truncated_inner.append(inner)
+                                else:
+                                    truncated_inner.append(inner)
+                            truncated_blocks.append({**block, "content": truncated_inner})
                         else:
                             truncated_blocks.append(block)
                     elif btype == "text":
